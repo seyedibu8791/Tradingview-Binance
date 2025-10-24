@@ -29,3 +29,9 @@ TRADE_AMOUNT      = float(os.getenv("TRADE_AMOUNT", "50"))
 LEVERAGE          = int(os.getenv("LEVERAGE", "20"))
 MARGIN_TYPE       = os.getenv("MARGIN_TYPE", "ISOLATED")
 LOG_FILLED_PRICE  = True   # log actual market order fill price
+
+# ==============================
+# 🔹 TRAILING STOP PARAMETERS
+# ==============================
+TRAILING_ACTIVATION_PERCENT = float(os.getenv("TRAILING_ACTIVATION_PERCENT", "0.8"))  # % activation
+TRAILING_CALLBACK_PERCENT   = float(os.getenv("TRAILING_CALLBACK_PERCENT", "0.1"))    # % callback
