@@ -51,11 +51,10 @@ def round_quantity(symbol, qty):
         return round(qty, 3)
     step_size = float([f["stepSize"] for f in info["filters"] if f["filterType"] == "LOT_SIZE"][0])
     min_qty = float([f["minQty"] for f in info["filters"] if f["filterType"] == "LOT_SIZE"][0])
-    # Round down to nearest step size
     qty = (qty // step_size) * step_size
     if qty < min_qty:
         qty = min_qty
-    return round(qty, 8)  # Binance allows up to 8 decimals
+    return round(qty, 8)
 
 def calculate_quantity(symbol, usdt_value):
     try:
@@ -90,8 +89,19 @@ def open_position(symbol, side):
     return response
 
 def close_position(symbol, side, price):
+    # Determine which side to close
     close_side = "SELL" if side == "BUY" else "BUY"
-    qty = calculate_quantity(symbol, TRADE_AMOUNT)
+    
+    # Check if there is an open position
+    pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
+    if not pos_data or float(pos_data[0]["positionAmt"]) == 0:
+        print(f"⚠️ No open position for {symbol}, skipping exit.")
+        return {"status": "no_position"}
+    
+    # Only exit if position exists
+    qty = abs(float(pos_data[0]["positionAmt"]))  # Use actual open qty
+    qty = round_quantity(symbol, qty)
+    
     retries = 3
     while retries > 0:
         response = binance_signed_request("POST", "/fapi/v1/order", {
@@ -132,6 +142,7 @@ def webhook():
             r = {"error": "Unknown comment"}
 
         return jsonify({"status": "ok", "response": r})
+
     except Exception as e:
         return jsonify({"error": str(e)})
 
