@@ -25,6 +25,7 @@ else:
 # ==============================
 # 🔹 TRADING PARAMETERS
 # ==============================
-TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "50"))
-LEVERAGE     = int(os.getenv("LEVERAGE", "20"))
-MARGIN_TYPE  = os.getenv("MARGIN_TYPE", "ISOLATED")
+TRADE_AMOUNT      = float(os.getenv("TRADE_AMOUNT", "50"))
+LEVERAGE          = int(os.getenv("LEVERAGE", "20"))
+MARGIN_TYPE       = os.getenv("MARGIN_TYPE", "ISOLATED")
+LOG_FILLED_PRICE  = True   # log actual market order fill price
