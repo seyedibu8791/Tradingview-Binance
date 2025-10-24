@@ -131,7 +131,7 @@ def self_ping():
     while True:
         try:
             print("🔄 Self-ping to keep bot alive...")
-            requests.get(f"https://your-render-app-url.onrender.com/ping")
+            requests.get(f"https://tradingview-binance-2o1v.onrender.com/ping")
         except Exception as e:
             print("❌ Self-ping failed:", e)
         time.sleep(PING_INTERVAL)
