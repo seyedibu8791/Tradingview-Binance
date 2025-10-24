@@ -84,42 +84,43 @@ def open_position(symbol, side):
             print("❌ Entry failed, retrying...", response)
             retries -= 1
             time.sleep(1)
-    filled_price = response.get("avgFillPrice") or (response.get("fills", [{}])[0].get("price"))
+    filled_price = float(response.get("avgFillPrice") or (response.get("fills", [{}])[0].get("price")))
     print(f"📊 {side} ENTRY: {symbol}, Qty: {qty}, Filled Price: {filled_price}")
+    trailing_stop_position(symbol, side, filled_price)
     return response
 
-def close_position(symbol, side, price):
-    # Determine which side to close
+def trailing_stop_position(symbol, side, entry_price):
+    # Determine opposite side to close
     close_side = "SELL" if side == "BUY" else "BUY"
 
-    # Check if there is an open position
+    # Check if position exists
     pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
     if not pos_data or float(pos_data[0]["positionAmt"]) == 0:
-        print(f"⚠️ No open position for {symbol}, skipping exit.")
+        print(f"⚠️ No open position for {symbol}, skipping trailing stop.")
         return {"status": "no_position"}
 
-    # Only exit if position exists
-    qty = abs(float(pos_data[0]["positionAmt"]))  # Use actual open qty
+    qty = abs(float(pos_data[0]["positionAmt"]))
     qty = round_quantity(symbol, qty)
 
-    retries = 3
-    while retries > 0:
-        response = binance_signed_request("POST", "/fapi/v1/order", {
-            "symbol": symbol,
-            "side": close_side,
-            "type": "LIMIT",
-            "price": price,
-            "quantity": qty,
-            "timeInForce": "GTC"
-        })
-        if "orderId" in response:
-            break
-        else:
-            print("❌ Exit failed, retrying...", response)
-            retries -= 1
-            time.sleep(1)
-    print(f"✖️ {close_side} EXIT: {symbol} @ {price}, Qty: {qty}")
-    return response
+    # Trailing stop calculation
+    if side == "BUY":
+        activation_price = entry_price * (1 + TRAILING_ACTIVATION_PERCENT / 100)
+    else:  # SHORT
+        activation_price = entry_price * (1 - TRAILING_ACTIVATION_PERCENT / 100)
+    callback_rate = TRAILING_CALLBACK_PERCENT  # Binance expects %
+
+    params = {
+        "symbol": symbol,
+        "side": close_side,
+        "quantity": qty,
+        "activationPrice": activation_price,
+        "callbackRate": callback_rate,
+        "reduceOnly": True
+    }
+
+    r = binance_signed_request("POST", "/fapi/v1/trailingStop", params)
+    print(f"⏳ Trailing STOP {close_side}: {symbol}, Qty: {qty}, Activation: {activation_price}, Callback: {callback_rate}%")
+    return r
 
 # ===== Webhook Endpoint =====
 @app.route('/webhook', methods=['POST'])
@@ -128,24 +129,15 @@ def webhook():
     try:
         ticker, comment, close_price, interval = data.split('|')
         symbol = ticker.replace("USDT", "") + "USDT"
-        close_price = float(close_price)
 
-        # Correct trade direction using comment
         if comment == "BUY_ENTRY":
             r = open_position(symbol, "BUY")
         elif comment == "SELL_ENTRY":
             r = open_position(symbol, "SELL")
-        elif comment == "EXIT_LONG":
-            # Close BUY (LONG) position
-            r = close_position(symbol, "BUY", close_price)
-        elif comment == "EXIT_SHORT":
-            # Close SELL (SHORT) position
-            r = close_position(symbol, "SELL", close_price)
         else:
             r = {"error": "Unknown comment"}
 
         return jsonify({"status": "ok", "response": r})
-
     except Exception as e:
         return jsonify({"error": str(e)})
 
