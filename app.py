@@ -89,36 +89,53 @@ def open_position(symbol, side):
     return response
 
 def close_position(symbol, side, price):
-    # Determine which side to close
+    import time
     close_side = "SELL" if side == "BUY" else "BUY"
 
-    # Check if there is an open position
+    # Check if open position exists
     pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
     if not pos_data or float(pos_data[0]["positionAmt"]) == 0:
         print(f"⚠️ No open position for {symbol}, skipping exit.")
         return {"status": "no_position"}
 
-    # Only exit if position exists
-    qty = abs(float(pos_data[0]["positionAmt"]))  # Use actual open qty
+    qty = abs(float(pos_data[0]["positionAmt"]))
     qty = round_quantity(symbol, qty)
 
-    retries = 3
-    while retries > 0:
-        response = binance_signed_request("POST", "/fapi/v1/order", {
+    order_type = EXIT_ORDER_TYPE.upper()
+    params = {}
+    if order_type == "MARKET":
+        # Delay execution for better price capture
+        if EXIT_ORDER_DELAY > 0:
+            print(f"⏱ Waiting {EXIT_ORDER_DELAY}s before MARKET exit for {symbol}...")
+            time.sleep(EXIT_ORDER_DELAY)
+        params = {
+            "symbol": symbol,
+            "side": close_side,
+            "type": "MARKET",
+            "quantity": qty
+        }
+    else:
+        # LIMIT exit
+        params = {
             "symbol": symbol,
             "side": close_side,
             "type": "LIMIT",
             "price": price,
             "quantity": qty,
             "timeInForce": "GTC"
-        })
+        }
+
+    retries = 3
+    while retries > 0:
+        response = binance_signed_request("POST", "/fapi/v1/order", params)
         if "orderId" in response:
             break
         else:
             print("❌ Exit failed, retrying...", response)
             retries -= 1
             time.sleep(1)
-    print(f"✖️ {close_side} EXIT: {symbol} @ {price}, Qty: {qty}")
+
+    print(f"✖️ {close_side} EXIT ({order_type}): {symbol} @ {price if order_type=='LIMIT' else 'MARKET'}, Qty: {qty}")
     return response
 
 # ===== Webhook Endpoint =====
@@ -130,22 +147,18 @@ def webhook():
         symbol = ticker.replace("USDT", "") + "USDT"
         close_price = float(close_price)
 
-        # Correct trade direction using comment
         if comment == "BUY_ENTRY":
             r = open_position(symbol, "BUY")
         elif comment == "SELL_ENTRY":
             r = open_position(symbol, "SELL")
         elif comment == "EXIT_LONG":
-            # Close BUY (LONG) position
             r = close_position(symbol, "BUY", close_price)
         elif comment == "EXIT_SHORT":
-            # Close SELL (SHORT) position
             r = close_position(symbol, "SELL", close_price)
         else:
             r = {"error": "Unknown comment"}
 
         return jsonify({"status": "ok", "response": r})
-
     except Exception as e:
         return jsonify({"error": str(e)})
 
@@ -155,7 +168,7 @@ def ping():
     return "pong", 200
 
 # ===== Self-Ping Thread =====
-PING_INTERVAL = 5 * 60  # 5 minutes
+PING_INTERVAL = 5 * 60
 def self_ping():
     while True:
         try:
