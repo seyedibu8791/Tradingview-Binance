@@ -1,13 +1,10 @@
 from flask import Flask, request, jsonify
-import requests, hmac, hashlib, time, threading, os
-
+import requests, hmac, hashlib, time, threading
 from config import *
 
 app = Flask(__name__)
 
-# =========================
-# BINANCE HELPERS
-# =========================
+# ===== Binance Helpers =====
 def binance_signed_request(http_method, path, params=None):
     if params is None:
         params = {}
@@ -29,7 +26,7 @@ def set_leverage_and_margin(symbol):
         binance_signed_request("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": LEVERAGE})
         binance_signed_request("POST", "/fapi/v1/marginType", {"symbol": symbol, "marginType": MARGIN_TYPE})
     except Exception as e:
-        print("Set leverage/margin error:", e)
+        print("Error setting leverage/margin:", e)
 
 def calculate_quantity(symbol, usdt_value):
     try:
@@ -40,12 +37,13 @@ def calculate_quantity(symbol, usdt_value):
     except:
         return 0.001
 
-# =========================
-# ORDER EXECUTION
-# =========================
-open_positions = {}  # Track current open positions {symbol: side}
-trailing_orders = {}  # Track trailing orders {symbol: callbackRate}
+# ===== Trailing Stop Helpers =====
+def ts_dynamic(profit_percent):
+    delta = TRAIL_OFFSET_HIGH - TRAIL_OFFSET_LOW
+    dynamic_ts = max((delta / 9.5) * (profit_percent - 0.5) + TRAIL_OFFSET_LOW, TRAIL_OFFSET_LOW)
+    return round(dynamic_ts, 2)
 
+# ===== Order Execution =====
 def open_position(symbol, side):
     set_leverage_and_margin(symbol)
     qty = calculate_quantity(symbol, TRADE_AMOUNT)
@@ -55,107 +53,92 @@ def open_position(symbol, side):
         "type": "MARKET",
         "quantity": qty
     })
-    open_positions[symbol] = side
-    print(f"📊 ENTRY: {side} {symbol}, Qty: {qty}")
-    # Place initial stop loss
-    place_stop_loss(symbol, side)
-    # Place initial trailing stop
-    place_trailing_stop(symbol, side)
+    print(f"📊 {side} ENTRY: {symbol}, Qty: {qty}")
     return r
 
-def place_stop_loss(symbol, side):
-    stop_price = None
-    qty = calculate_quantity(symbol, TRADE_AMOUNT)
-    if side == "BUY":
-        stop_price = float(requests.get(f"{BASE_URL}/fapi/v1/ticker/price", params={"symbol": symbol}).json()["price"]) * (1 - STOP_LOSS / 100)
+def set_trailing_stop(symbol, side, entry_price):
+    # Binance trailing stop uses activation price and callback rate %
+    if side.upper() == "BUY":
         stop_side = "SELL"
-    else:
-        stop_price = float(requests.get(f"{BASE_URL}/fapi/v1/ticker/price", params={"symbol": symbol}).json()["price"]) * (1 + STOP_LOSS / 100)
-        stop_side = "BUY"
-    r = binance_signed_request("POST", "/fapi/v1/order", {
-        "symbol": symbol,
-        "side": stop_side,
-        "type": "STOP_MARKET",
-        "stopPrice": round(stop_price, 2),
-        "quantity": qty
-    })
-    print(f"🛑 STOP LOSS placed for {symbol} at {round(stop_price,2)}")
-    return r
-
-def place_trailing_stop(symbol, side):
-    qty = calculate_quantity(symbol, TRADE_AMOUNT)
-    # Use env vars for trailing activation and callback
-    callbackRate = TRAIL_OFFSET  # %
-    activationPrice = TRAIL_ACTIVATION  # %
-    if side == "BUY":
-        stop_side = "SELL"
+        activation_price = round(entry_price * (1 + TRAIL_ACTIVATION / 100), 2)
     else:
         stop_side = "BUY"
+        activation_price = round(entry_price * (1 - TRAIL_ACTIVATION / 100), 2)
+    
+    qty = calculate_quantity(symbol, TRADE_AMOUNT)
     r = binance_signed_request("POST", "/fapi/v1/order", {
         "symbol": symbol,
         "side": stop_side,
         "type": "TRAILING_STOP_MARKET",
         "quantity": qty,
-        "callbackRate": callbackRate,
-        "activationPrice": None  # Let Binance calculate activation from market price
+        "callbackRate": round(ts_dynamic(TRAIL_ACTIVATION), 2),
+        "activationPrice": activation_price
     })
-    trailing_orders[symbol] = callbackRate
-    print(f"🏹 TRAILING STOP placed for {symbol} with callback {callbackRate}%")
+    print(f"🟡 Trailing Stop SET: {stop_side}, Entry: {entry_price}, Activation: {activation_price}, Qty: {qty}")
     return r
 
-def update_trailing_stop(symbol, side, new_callback):
-    """
-    Cancel previous trailing stop & place new one if callbackRate changes
-    """
-    # Cancel old trailing stop
-    binance_signed_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
-    print(f"🔄 Cancelled old trailing stop for {symbol}")
-    # Place new trailing stop
-    place_trailing_stop(symbol, side)
+def set_stoploss(symbol, side, entry_price):
+    qty = calculate_quantity(symbol, TRADE_AMOUNT)
+    if side.upper() == "BUY":
+        stop_side = "SELL"
+        stop_price = round(entry_price * (1 - STOPLOSS_PERCENT / 100), 2)
+    else:
+        stop_side = "BUY"
+        stop_price = round(entry_price * (1 + STOPLOSS_PERCENT / 100), 2)
+    
+    r = binance_signed_request("POST", "/fapi/v1/order", {
+        "symbol": symbol,
+        "side": stop_side,
+        "type": "STOP_MARKET",
+        "stopPrice": stop_price,
+        "closePosition": True
+    })
+    print(f"🔴 Stoploss SET: {stop_side}, Entry: {entry_price}, SL Price: {stop_price}, Qty: {qty}")
+    return r
 
-# =========================
-# WEBHOOK
-# =========================
+# ===== Webhook Endpoint =====
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_data(as_text=True)
     try:
         ticker, comment, close_price, interval = data.split('|')
-        symbol = ticker.replace("USDT","") + "USDT"
+        symbol = ticker.replace("USDT", "") + "USDT"
         close_price = float(close_price)
+        side = None
 
-        if "LONG" in comment:
-            r = open_position(symbol, "BUY")
-        elif "SHORT" in comment:
-            r = open_position(symbol, "SELL")
+        if "LONG" in comment and "EXIT" not in comment:
+            side = "BUY"
+        elif "SHORT" in comment and "EXIT" not in comment:
+            side = "SELL"
+
+        if side:
+            open_position(symbol, side)
+            set_trailing_stop(symbol, side, close_price)
+            set_stoploss(symbol, side, close_price)
+            return jsonify({"status": "ok", "message": f"{side} position opened with trailing stop & SL"})
         else:
-            r = {"error":"Unknown comment or ignored exit"}
-        return jsonify({"status": "ok", "response": r})
-
+            return jsonify({"status": "ignored", "message": "No entry signal found, exit ignored"})
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# =========================
-# PING & SELF-PING
-# =========================
+# ===== Ping Endpoint =====
 @app.route('/ping', methods=['GET'])
 def ping():
-    return jsonify({"status":"ok", "message":"Bot is alive"}), 200
+    return "pong", 200
 
+# ===== Self-Ping Thread =====
 def self_ping():
     while True:
         try:
-            requests.get(os.getenv("RENDER_EXTERNAL_URL","http://localhost:5000")+"/ping")
-            print("[Self-ping] Ping sent successfully.")
+            print("🔄 Self-ping to keep bot alive...")
+            requests.get(f"https://your-render-app-url.onrender.com/ping")
         except Exception as e:
-            print("[Self-ping] Error:", e)
-        time.sleep(600)  # 10 minutes
+            print("❌ Self-ping failed:", e)
+        time.sleep(PING_INTERVAL)
 
 threading.Thread(target=self_ping, daemon=True).start()
 
-# =========================
-# RUN
-# =========================
-if __name__ == "__main__":
-    port = int(os.getenv("PORT",5000))
+# ===== Run Flask =====
+if __name__ == '__main__':
+    port = int(os.getenv("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
