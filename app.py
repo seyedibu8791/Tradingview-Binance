@@ -91,17 +91,17 @@ def open_position(symbol, side):
 def close_position(symbol, side, price):
     # Determine which side to close
     close_side = "SELL" if side == "BUY" else "BUY"
-    
+
     # Check if there is an open position
     pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
     if not pos_data or float(pos_data[0]["positionAmt"]) == 0:
         print(f"⚠️ No open position for {symbol}, skipping exit.")
         return {"status": "no_position"}
-    
+
     # Only exit if position exists
     qty = abs(float(pos_data[0]["positionAmt"]))  # Use actual open qty
     qty = round_quantity(symbol, qty)
-    
+
     retries = 3
     while retries > 0:
         response = binance_signed_request("POST", "/fapi/v1/order", {
@@ -130,13 +130,16 @@ def webhook():
         symbol = ticker.replace("USDT", "") + "USDT"
         close_price = float(close_price)
 
-        if "LONG" in comment and "EXIT" not in comment:
+        # Correct trade direction using comment
+        if comment == "BUY_ENTRY":
             r = open_position(symbol, "BUY")
-        elif "SHORT" in comment and "EXIT" not in comment:
+        elif comment == "SELL_ENTRY":
             r = open_position(symbol, "SELL")
-        elif "EXIT_LONG" in comment:
+        elif comment == "EXIT_LONG":
+            # Close BUY (LONG) position
             r = close_position(symbol, "BUY", close_price)
-        elif "EXIT_SHORT" in comment:
+        elif comment == "EXIT_SHORT":
+            # Close SELL (SHORT) position
             r = close_position(symbol, "SELL", close_price)
         else:
             r = {"error": "Unknown comment"}
