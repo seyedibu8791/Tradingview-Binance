@@ -35,3 +35,8 @@ LOG_FILLED_PRICE  = True   # log actual market order fill price
 # ==============================
 TRAILING_ACTIVATION_PERCENT = float(os.getenv("TRAILING_ACTIVATION_PERCENT", "0.8"))  # % activation
 TRAILING_CALLBACK_PERCENT   = float(os.getenv("TRAILING_CALLBACK_PERCENT", "0.1"))    # % callback
+
+# ==============================
+# 🔹 STOP-LOSS PARAMETERS
+# ==============================
+STOPLOSS_PERCENT = float(os.getenv("STOPLOSS_PERCENT", "2.2"))  # % stop-loss
