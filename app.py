@@ -14,19 +14,23 @@ def binance_signed_request(http_method, path, params=None):
     query += f"&signature={signature}"
     url = f"{BASE_URL}{path}?{query}"
     headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
-    if http_method == "POST":
-        return requests.post(url, headers=headers).json()
-    elif http_method == "DELETE":
-        return requests.delete(url, headers=headers).json()
-    else:
-        return requests.get(url, headers=headers).json()
+    try:
+        if http_method == "POST":
+            return requests.post(url, headers=headers).json()
+        elif http_method == "DELETE":
+            return requests.delete(url, headers=headers).json()
+        else:
+            return requests.get(url, headers=headers).json()
+    except Exception as e:
+        print("❌ Binance request failed:", e)
+        return {"error": str(e)}
 
 def set_leverage_and_margin(symbol):
     try:
         binance_signed_request("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": LEVERAGE})
         binance_signed_request("POST", "/fapi/v1/marginType", {"symbol": symbol, "marginType": MARGIN_TYPE})
-    except:
-        pass
+    except Exception as e:
+        print("❌ Failed to set leverage/margin:", e)
 
 def calculate_quantity(symbol, usdt_value):
     try:
@@ -41,19 +45,23 @@ def calculate_quantity(symbol, usdt_value):
 def open_position(symbol, side):
     set_leverage_and_margin(symbol)
     qty = calculate_quantity(symbol, TRADE_AMOUNT)
-    r = binance_signed_request("POST", "/fapi/v1/order", {
+    response = binance_signed_request("POST", "/fapi/v1/order", {
         "symbol": symbol,
         "side": side,
         "type": "MARKET",
         "quantity": qty
     })
-    print(f"📊 {side} ENTRY: {symbol}, Qty: {qty}")
-    return r
+    if LOG_FILLED_PRICE:
+        filled_price = response.get("avgFillPrice") or response.get("fills", [{}])[0].get("price")
+        print(f"📊 {side} ENTRY: {symbol}, Qty: {qty}, Filled Price: {filled_price}")
+    else:
+        print(f"📊 {side} ENTRY: {symbol}, Qty: {qty}")
+    return response
 
 def close_position(symbol, side, price):
     close_side = "SELL" if side == "BUY" else "BUY"
     qty = calculate_quantity(symbol, TRADE_AMOUNT)
-    r = binance_signed_request("POST", "/fapi/v1/order", {
+    response = binance_signed_request("POST", "/fapi/v1/order", {
         "symbol": symbol,
         "side": close_side,
         "type": "LIMIT",
@@ -62,7 +70,7 @@ def close_position(symbol, side, price):
         "timeInForce": "GTC"
     })
     print(f"✖️ {close_side} EXIT: {symbol} @ {price}, Qty: {qty}")
-    return r
+    return response
 
 # ===== Webhook Endpoint =====
 @app.route('/webhook', methods=['POST'])
@@ -96,7 +104,6 @@ def ping():
 
 # ===== Self-Ping Thread =====
 PING_INTERVAL = 5 * 60  # 5 minutes
-
 def self_ping():
     while True:
         try:
