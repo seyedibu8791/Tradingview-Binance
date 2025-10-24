@@ -32,11 +32,37 @@ def set_leverage_and_margin(symbol):
     except Exception as e:
         print("❌ Failed to set leverage/margin:", e)
 
+# ===== Symbol Info =====
+SYMBOL_INFO_CACHE = {}
+
+def get_symbol_info(symbol):
+    if symbol in SYMBOL_INFO_CACHE:
+        return SYMBOL_INFO_CACHE[symbol]
+    info = requests.get(f"{BASE_URL}/fapi/v1/exchangeInfo").json()
+    for s in info.get("symbols", []):
+        if s["symbol"] == symbol:
+            SYMBOL_INFO_CACHE[symbol] = s
+            return s
+    return None
+
+def round_quantity(symbol, qty):
+    info = get_symbol_info(symbol)
+    if not info:
+        return round(qty, 3)
+    step_size = float([f["stepSize"] for f in info["filters"] if f["filterType"] == "LOT_SIZE"][0])
+    min_qty = float([f["minQty"] for f in info["filters"] if f["filterType"] == "LOT_SIZE"][0])
+    # Round down to nearest step size
+    qty = (qty // step_size) * step_size
+    if qty < min_qty:
+        qty = min_qty
+    return round(qty, 8)  # Binance allows up to 8 decimals
+
 def calculate_quantity(symbol, usdt_value):
     try:
         price_data = requests.get(f"{BASE_URL}/fapi/v1/ticker/price", params={"symbol": symbol}).json()
         price = float(price_data["price"])
-        qty = round(usdt_value / price, 3)
+        qty = usdt_value / price
+        qty = round_quantity(symbol, qty)
         return qty
     except:
         return 0.001
@@ -45,30 +71,43 @@ def calculate_quantity(symbol, usdt_value):
 def open_position(symbol, side):
     set_leverage_and_margin(symbol)
     qty = calculate_quantity(symbol, TRADE_AMOUNT)
-    response = binance_signed_request("POST", "/fapi/v1/order", {
-        "symbol": symbol,
-        "side": side,
-        "type": "MARKET",
-        "quantity": qty
-    })
-    if LOG_FILLED_PRICE:
-        filled_price = response.get("avgFillPrice") or response.get("fills", [{}])[0].get("price")
-        print(f"📊 {side} ENTRY: {symbol}, Qty: {qty}, Filled Price: {filled_price}")
-    else:
-        print(f"📊 {side} ENTRY: {symbol}, Qty: {qty}")
+    retries = 3
+    while retries > 0:
+        response = binance_signed_request("POST", "/fapi/v1/order", {
+            "symbol": symbol,
+            "side": side,
+            "type": "MARKET",
+            "quantity": qty
+        })
+        if "orderId" in response:
+            break
+        else:
+            print("❌ Entry failed, retrying...", response)
+            retries -= 1
+            time.sleep(1)
+    filled_price = response.get("avgFillPrice") or (response.get("fills", [{}])[0].get("price"))
+    print(f"📊 {side} ENTRY: {symbol}, Qty: {qty}, Filled Price: {filled_price}")
     return response
 
 def close_position(symbol, side, price):
     close_side = "SELL" if side == "BUY" else "BUY"
     qty = calculate_quantity(symbol, TRADE_AMOUNT)
-    response = binance_signed_request("POST", "/fapi/v1/order", {
-        "symbol": symbol,
-        "side": close_side,
-        "type": "LIMIT",
-        "price": price,
-        "quantity": qty,
-        "timeInForce": "GTC"
-    })
+    retries = 3
+    while retries > 0:
+        response = binance_signed_request("POST", "/fapi/v1/order", {
+            "symbol": symbol,
+            "side": close_side,
+            "type": "LIMIT",
+            "price": price,
+            "quantity": qty,
+            "timeInForce": "GTC"
+        })
+        if "orderId" in response:
+            break
+        else:
+            print("❌ Exit failed, retrying...", response)
+            retries -= 1
+            time.sleep(1)
     print(f"✖️ {close_side} EXIT: {symbol} @ {price}, Qty: {qty}")
     return response
 
@@ -93,7 +132,6 @@ def webhook():
             r = {"error": "Unknown comment"}
 
         return jsonify({"status": "ok", "response": r})
-
     except Exception as e:
         return jsonify({"error": str(e)})
 
