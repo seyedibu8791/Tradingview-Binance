@@ -1,8 +1,8 @@
 import os
 
-# ==============================
-# 🔹 BINANCE CONFIGURATION
-# ==============================
+# ==========================
+# BINANCE CONFIG
+# ==========================
 USE_TESTNET = os.getenv("USE_TESTNET", "True") == "True"
 
 TESTNET_API_KEY    = os.getenv("TESTNET_API_KEY")
@@ -22,21 +22,12 @@ else:
     BINANCE_SECRET_KEY = LIVE_SECRET_KEY
     BASE_URL           = LIVE_BASE_URL
 
-# ==============================
-# 🔹 TRADING PARAMETERS
-# ==============================
-TRADE_AMOUNT      = float(os.getenv("TRADE_AMOUNT", "50"))
-LEVERAGE          = int(os.getenv("LEVERAGE", "20"))
-MARGIN_TYPE       = os.getenv("MARGIN_TYPE", "ISOLATED")
-LOG_FILLED_PRICE  = True   # log actual market order fill price
-
-# ==============================
-# 🔹 TRAILING STOP PARAMETERS
-# ==============================
-TRAILING_ACTIVATION_PERCENT = float(os.getenv("TRAILING_ACTIVATION_PERCENT", "0.8"))  # % activation
-TRAILING_CALLBACK_PERCENT   = float(os.getenv("TRAILING_CALLBACK_PERCENT", "0.1"))    # % callback
-
-# ==============================
-# 🔹 STOP-LOSS PARAMETERS
-# ==============================
-STOPLOSS_PERCENT = float(os.getenv("STOPLOSS_PERCENT", "2.2"))  # % stop-loss
+# ==========================
+# TRADING PARAMETERS
+# ==========================
+TRADE_AMOUNT       = float(os.getenv("TRADE_AMOUNT","50"))
+LEVERAGE           = int(os.getenv("LEVERAGE","20"))
+MARGIN_TYPE        = os.getenv("MARGIN_TYPE","ISOLATED")
+STOP_LOSS          = float(os.getenv("STOP_LOSS","0.3"))          # %
+TRAIL_ACTIVATION   = float(os.getenv("TRAIL_ACTIVATION","0.3"))   # %
+TRAIL_OFFSET       = float(os.getenv("TRAIL_OFFSET","0.1"))       # %
