@@ -32,7 +32,7 @@ def set_leverage_and_margin(symbol):
     except Exception as e:
         print("❌ Failed to set leverage/margin:", e)
 
-# ===== Symbol Info =====
+# ===== Symbol Info & Tick/Step Size =====
 SYMBOL_INFO_CACHE = {}
 
 def get_symbol_info(symbol):
@@ -44,6 +44,17 @@ def get_symbol_info(symbol):
             SYMBOL_INFO_CACHE[symbol] = s
             return s
     return None
+
+def get_tick_size(symbol):
+    info = get_symbol_info(symbol)
+    if not info:
+        return 0.01
+    tick_size = float([f["tickSize"] for f in info["filters"] if f["filterType"] == "PRICE_FILTER"][0])
+    return tick_size
+
+def round_price(symbol, price):
+    tick_size = get_tick_size(symbol)
+    return round(price / tick_size) * tick_size
 
 def round_quantity(symbol, qty):
     info = get_symbol_info(symbol)
@@ -66,34 +77,42 @@ def calculate_quantity(symbol, usdt_value):
     except:
         return 0.001
 
-# ===== Order Execution =====
-def open_position(symbol, side):
-    set_leverage_and_margin(symbol)
-    qty = calculate_quantity(symbol, TRADE_AMOUNT)
-    retries = 3
-    while retries > 0:
-        response = binance_signed_request("POST", "/fapi/v1/order", {
-            "symbol": symbol,
-            "side": side,
-            "type": "MARKET",
-            "quantity": qty
-        })
-        if "orderId" in response:
-            break
-        else:
-            print("❌ Entry failed, retrying...", response)
-            retries -= 1
-            time.sleep(1)
-    filled_price = float(response.get("avgFillPrice") or (response.get("fills", [{}])[0].get("price")))
-    print(f"📊 {side} ENTRY: {symbol}, Qty: {qty}, Filled Price: {filled_price}")
-    trailing_stop_position(symbol, side, filled_price)
-    return response
-
-def trailing_stop_position(symbol, side, entry_price):
-    # Determine opposite side to close
+# ===== Stop-Loss =====
+def stop_loss_position(symbol, side, entry_price):
     close_side = "SELL" if side == "BUY" else "BUY"
 
-    # Check if position exists
+    pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
+    if not pos_data or float(pos_data[0]["positionAmt"]) == 0:
+        print(f"⚠️ No open position for {symbol}, skipping stop-loss.")
+        return {"status": "no_position"}
+
+    qty = abs(float(pos_data[0]["positionAmt"]))
+    qty = round_quantity(symbol, qty)
+
+    if side == "BUY":
+        stop_price_raw = entry_price * (1 - STOPLOSS_PERCENT / 100)
+    else:
+        stop_price_raw = entry_price * (1 + STOPLOSS_PERCENT / 100)
+
+    stop_price = round_price(symbol, stop_price_raw)
+
+    params = {
+        "symbol": symbol,
+        "side": close_side,
+        "quantity": qty,
+        "stopPrice": stop_price,
+        "type": "STOP_MARKET",
+        "reduceOnly": True
+    }
+
+    r = binance_signed_request("POST", "/fapi/v1/order", params)
+    print(f"⛔ Stop-Loss {close_side}: {symbol}, Qty: {qty}, Stop Price: {stop_price}")
+    return r
+
+# ===== Trailing Stop =====
+def trailing_stop_position(symbol, side, entry_price):
+    close_side = "SELL" if side == "BUY" else "BUY"
+
     pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
     if not pos_data or float(pos_data[0]["positionAmt"]) == 0:
         print(f"⚠️ No open position for {symbol}, skipping trailing stop.")
@@ -102,25 +121,44 @@ def trailing_stop_position(symbol, side, entry_price):
     qty = abs(float(pos_data[0]["positionAmt"]))
     qty = round_quantity(symbol, qty)
 
-    # Trailing stop calculation
     if side == "BUY":
-        activation_price = entry_price * (1 + TRAILING_ACTIVATION_PERCENT / 100)
-    else:  # SHORT
-        activation_price = entry_price * (1 - TRAILING_ACTIVATION_PERCENT / 100)
-    callback_rate = TRAILING_CALLBACK_PERCENT  # Binance expects %
+        activation_price_raw = entry_price * (1 + TRAILING_ACTIVATION_PERCENT / 100)
+    else:
+        activation_price_raw = entry_price * (1 - TRAILING_ACTIVATION_PERCENT / 100)
+
+    activation_price = round_price(symbol, activation_price_raw)
 
     params = {
         "symbol": symbol,
         "side": close_side,
         "quantity": qty,
         "activationPrice": activation_price,
-        "callbackRate": callback_rate,
+        "callbackRate": TRAILING_CALLBACK_PERCENT,
         "reduceOnly": True
     }
 
     r = binance_signed_request("POST", "/fapi/v1/trailingStop", params)
-    print(f"⏳ Trailing STOP {close_side}: {symbol}, Qty: {qty}, Activation: {activation_price}, Callback: {callback_rate}%")
+    print(f"⏳ Trailing STOP {close_side}: {symbol}, Qty: {qty}, Activation: {activation_price}, Callback: {TRAILING_CALLBACK_PERCENT}%")
     return r
+
+# ===== Open Position =====
+def open_position(symbol, side):
+    set_leverage_and_margin(symbol)
+    qty = calculate_quantity(symbol, TRADE_AMOUNT)
+    response = binance_signed_request("POST", "/fapi/v1/order", {
+        "symbol": symbol,
+        "side": side,
+        "type": "MARKET",
+        "quantity": qty
+    })
+
+    filled_price = float(response.get("avgFillPrice") or (response.get("fills", [{}])[0].get("price")))
+    print(f"📊 {side} ENTRY: {symbol}, Qty: {qty}, Filled Price: {filled_price}")
+
+    # Place stop-loss and trailing stop
+    stop_loss_position(symbol, side, filled_price)
+    trailing_stop_position(symbol, side, filled_price)
+    return response
 
 # ===== Webhook Endpoint =====
 @app.route('/webhook', methods=['POST'])
