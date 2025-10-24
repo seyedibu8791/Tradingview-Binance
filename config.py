@@ -25,24 +25,7 @@ else:
 # ==============================
 # 🔹 TRADING PARAMETERS
 # ==============================
-TRADE_AMOUNT        = float(os.getenv("TRADE_AMOUNT", "50"))       # $ per trade
-LEVERAGE            = int(os.getenv("LEVERAGE", "20"))             # leverage
-MARGIN_TYPE         = os.getenv("MARGIN_TYPE", "ISOLATED")         # ISOLATED or CROSS
-
-# ==============================
-# 🔹 TRAILING STOP SETTINGS
-# ==============================
-TRAIL_ACTIVATION    = float(os.getenv("TRAIL_ACTIVATION", "0.8")) # % activation
-TRAIL_OFFSET_LOW    = float(os.getenv("TRAIL_OFFSET_LOW", "0.1"))  # min offset %
-TRAIL_OFFSET_HIGH   = float(os.getenv("TRAIL_OFFSET_HIGH", "0.1")) # max offset %
-
-# ==============================
-# 🔹 STOPLOSS SETTINGS
-# ==============================
-STOPLOSS_PERCENT    = float(os.getenv("STOPLOSS_PERCENT", "3.0")) # % stoploss
-
-# ==============================
-# 🔹 BOT SETTINGS
-# ==============================
-PING_INTERVAL       = int(os.getenv("PING_INTERVAL", 300))         # seconds
-TS_UPDATE_INTERVAL  = int(os.getenv("TS_UPDATE_INTERVAL", 5))      # seconds
+TRADE_AMOUNT      = float(os.getenv("TRADE_AMOUNT", "50"))
+LEVERAGE          = int(os.getenv("LEVERAGE", "20"))
+MARGIN_TYPE       = os.getenv("MARGIN_TYPE", "ISOLATED")
+LOG_FILLED_PRICE  = True   # log actual market order fill price
