@@ -4,7 +4,9 @@ from config import *
 
 app = Flask(__name__)
 
-# ===== Binance Signed Request =====
+# ==========================
+# 🔹 Binance API Helpers
+# ==========================
 def binance_signed_request(http_method, path, params=None):
     if params is None:
         params = {}
@@ -21,35 +23,52 @@ def binance_signed_request(http_method, path, params=None):
     else:
         return requests.get(url, headers=headers).json()
 
-# ===== Leverage & Margin =====
+
 def set_leverage_and_margin(symbol):
     try:
         binance_signed_request("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": LEVERAGE})
         binance_signed_request("POST", "/fapi/v1/marginType", {"symbol": symbol, "marginType": MARGIN_TYPE})
     except Exception as e:
-        print("⚠️ Leverage/Margin setup failed:", e)
+        print(f"⚠️ Leverage/Margin setup failed: {e}")
 
-# ===== Quantity Calculation =====
+
 def calculate_quantity(symbol, usdt_value):
     try:
         price_data = requests.get(f"{BASE_URL}/fapi/v1/ticker/price", params={"symbol": symbol}).json()
         price = float(price_data["price"])
         qty = round(usdt_value / price, 3)
         return qty
-    except:
+    except Exception as e:
+        print("⚠️ Quantity calc failed:", e)
         return 0.001
 
-# ===== Check Position =====
-def get_open_position(symbol):
-    positions = binance_signed_request("GET", "/fapi/v2/positionRisk")
-    for pos in positions:
-        if pos["symbol"] == symbol:
-            position_amt = float(pos["positionAmt"])
-            if position_amt != 0:
-                return position_amt
-    return 0
 
-# ===== Open Position =====
+def get_open_position(symbol):
+    """Check if a position exists for the given symbol."""
+    try:
+        positions = binance_signed_request("GET", "/fapi/v2/positionRisk")
+        for pos in positions:
+            if pos["symbol"] == symbol and float(pos["positionAmt"]) != 0:
+                return float(pos["positionAmt"])
+    except Exception as e:
+        print(f"⚠️ Could not fetch position for {symbol}: {e}")
+    return 0.0
+
+
+def cancel_open_orders(symbol):
+    """Cancel all open orders for the given symbol."""
+    try:
+        r = binance_signed_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
+        print(f"🧹 Cancelled open orders for {symbol}")
+        return r
+    except Exception as e:
+        print(f"⚠️ Cancel orders failed for {symbol}: {e}")
+        return None
+
+
+# ==========================
+# 🔹 Order Execution
+# ==========================
 def open_position(symbol, side):
     set_leverage_and_margin(symbol)
     qty = calculate_quantity(symbol, TRADE_AMOUNT)
@@ -59,76 +78,85 @@ def open_position(symbol, side):
         "type": "MARKET",
         "quantity": qty
     })
-    print(f"✅ ENTRY: {side} {symbol}, Qty: {qty}")
+    print(f"✅ ENTRY {side}: {symbol}, Qty: {qty}")
     return r
 
-# ===== Close Position =====
+
 def close_position(symbol, side, price):
-    position_amt = get_open_position(symbol)
-    if position_amt == 0:
-        print(f"⚠️ No open position for {symbol}. Exit skipped.")
-        return {"error": "No open position"}
+    """Close position based on order type (LIMIT or MARKET)."""
+    close_side = "SELL" if side == "BUY" else "BUY"
+    qty = abs(get_open_position(symbol))
+    if qty == 0:
+        print(f"🚫 No open position to close for {symbol}. Cancelling orders...")
+        cancel_open_orders(symbol)
+        return {"status": "no_position"}
 
-    close_side = "SELL" if position_amt > 0 else "BUY"
-    qty = abs(position_amt)
+    order_type = os.getenv("EXIT_ORDER_TYPE", "LIMIT").upper()
+    delay = int(os.getenv("EXIT_ORDER_DELAY", "2"))
 
-    if EXIT_ORDER_TYPE == "MARKET":
-        delay = int(os.getenv("EXIT_ORDER_DELAY", "0"))
-        print(f"⏱ Waiting {delay}s before MARKET exit...")
+    if order_type == "MARKET":
+        print(f"🕒 Waiting {delay}s before MARKET exit to capture better price...")
         time.sleep(delay)
-        order = binance_signed_request("POST", "/fapi/v1/order", {
+        params = {
             "symbol": symbol,
             "side": close_side,
             "type": "MARKET",
             "quantity": qty
-        })
+        }
     else:
-        order = binance_signed_request("POST", "/fapi/v1/order", {
+        params = {
             "symbol": symbol,
             "side": close_side,
             "type": "LIMIT",
             "price": price,
             "quantity": qty,
             "timeInForce": "GTC"
-        })
+        }
 
-    print(f"✖️ EXIT {close_side}: {symbol} @ {price} Qty: {qty}")
-    return order
+    r = binance_signed_request("POST", "/fapi/v1/order", params)
+    print(f"✖️ EXIT {close_side} {order_type}: {symbol} @ {price}, Qty: {qty}")
+    return r
 
-# ===== Webhook =====
+
+# ==========================
+# 🔹 Webhook Endpoint
+# ==========================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_data(as_text=True)
     try:
         ticker, comment, close_price, interval = data.split('|')
-        symbol = ticker.upper().replace("USDT", "") + "USDT"
+        symbol = ticker.replace("USDT", "") + "USDT"
         close_price = float(close_price)
 
-        print(f"📩 ALERT: {symbol} | {comment} | Price {close_price}")
-
-        if "EXIT_LONG" in comment:
+        if "LONG" in comment and "EXIT" not in comment:
+            r = open_position(symbol, "BUY")
+        elif "SHORT" in comment and "EXIT" not in comment:
+            r = open_position(symbol, "SELL")
+        elif "EXIT_LONG" in comment:
             r = close_position(symbol, "BUY", close_price)
         elif "EXIT_SHORT" in comment:
             r = close_position(symbol, "SELL", close_price)
-        elif "LONG" in comment:
-            r = open_position(symbol, "BUY")
-        elif "SHORT" in comment:
-            r = open_position(symbol, "SELL")
         else:
             r = {"error": "Unknown comment"}
 
         return jsonify({"status": "ok", "response": r})
+
     except Exception as e:
         print("❌ Error in webhook:", e)
         return jsonify({"error": str(e)})
 
-# ===== Ping =====
+
+# ==========================
+# 🔹 Ping + Keep Alive
+# ==========================
 @app.route('/ping', methods=['GET'])
 def ping():
     return "pong", 200
 
-# ===== Self-Ping =====
-PING_INTERVAL = 300  # 5 min
+
+PING_INTERVAL = 5 * 60  # 5 minutes
+
 def self_ping():
     while True:
         try:
@@ -140,6 +168,9 @@ def self_ping():
 
 threading.Thread(target=self_ping, daemon=True).start()
 
+# ==========================
+# 🔹 Run Flask
+# ==========================
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
