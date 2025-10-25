@@ -1,176 +1,155 @@
 from flask import Flask, request, jsonify
-import requests, hmac, hashlib, time, threading, os
-from config import *
+import os, requests, time, hmac, hashlib
+from urllib.parse import urlencode
+from config import (
+    BASE_URL, API_KEY, API_SECRET,
+    MAX_ACTIVE_TRADES, EXIT_ORDER_TYPE, EXIT_DELAY_SEC
+)
 
 app = Flask(__name__)
 
-# ==========================
-# 🔹 Binance API Helpers
-# ==========================
-def binance_signed_request(http_method, path, params=None):
-    if params is None:
+# =========================
+# UTILITY FUNCTIONS
+# =========================
+
+def sign_request(params):
+    """Sign request parameters using HMAC SHA256"""
+    query_string = urlencode(params)
+    signature = hmac.new(
+        API_SECRET.encode('utf-8'),
+        query_string.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+    return signature
+
+
+def binance_request(method, endpoint, params=None):
+    """Unified Binance REST request"""
+    headers = {"X-MBX-APIKEY": API_KEY}
+    url = f"{BASE_URL}{endpoint}"
+    if not params:
         params = {}
-    params["timestamp"] = int(time.time() * 1000)
-    query = "&".join([f"{k}={v}" for k, v in params.items()])
-    signature = hmac.new(BINANCE_SECRET_KEY.encode(), query.encode(), hashlib.sha256).hexdigest()
-    query += f"&signature={signature}"
-    url = f"{BASE_URL}{path}?{query}"
-    headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
-    if http_method == "POST":
-        return requests.post(url, headers=headers).json()
-    elif http_method == "DELETE":
-        return requests.delete(url, headers=headers).json()
+    params['timestamp'] = int(time.time() * 1000)
+    params['signature'] = sign_request(params)
+    if method == "POST":
+        res = requests.post(url, headers=headers, params=params)
+    elif method == "GET":
+        res = requests.get(url, headers=headers, params=params)
+    elif method == "DELETE":
+        res = requests.delete(url, headers=headers, params=params)
     else:
-        return requests.get(url, headers=headers).json()
+        raise Exception("Unsupported HTTP method")
+    return res.json()
 
 
-def set_leverage_and_margin(symbol):
+def get_active_trades():
+    """Fetch number of open positions"""
     try:
-        binance_signed_request("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": LEVERAGE})
-        binance_signed_request("POST", "/fapi/v1/marginType", {"symbol": symbol, "marginType": MARGIN_TYPE})
+        headers = {"X-MBX-APIKEY": API_KEY}
+        url = f"{BASE_URL}/fapi/v2/positionRisk"
+        response = requests.get(url, headers=headers)
+        data = response.json()
+        active_positions = [p for p in data if float(p['positionAmt']) != 0]
+        return len(active_positions)
     except Exception as e:
-        print(f"⚠️ Leverage/Margin setup failed: {e}")
-
-
-def calculate_quantity(symbol, usdt_value):
-    try:
-        price_data = requests.get(f"{BASE_URL}/fapi/v1/ticker/price", params={"symbol": symbol}).json()
-        price = float(price_data["price"])
-        qty = round(usdt_value / price, 3)
-        return qty
-    except Exception as e:
-        print("⚠️ Quantity calc failed:", e)
-        return 0.001
+        print("⚠️ Error fetching active trades:", e)
+        return 0
 
 
 def get_open_position(symbol):
-    """Check if a position exists for the given symbol."""
+    """Return open position info for a symbol if exists"""
     try:
-        positions = binance_signed_request("GET", "/fapi/v2/positionRisk")
-        for pos in positions:
+        headers = {"X-MBX-APIKEY": API_KEY}
+        url = f"{BASE_URL}/fapi/v2/positionRisk"
+        response = requests.get(url, headers=headers)
+        data = response.json()
+        for pos in data:
             if pos["symbol"] == symbol and float(pos["positionAmt"]) != 0:
-                return float(pos["positionAmt"])
+                return pos
+        return None
     except Exception as e:
-        print(f"⚠️ Could not fetch position for {symbol}: {e}")
-    return 0.0
-
-
-def cancel_open_orders(symbol):
-    """Cancel all open orders for the given symbol."""
-    try:
-        r = binance_signed_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
-        print(f"🧹 Cancelled open orders for {symbol}")
-        return r
-    except Exception as e:
-        print(f"⚠️ Cancel orders failed for {symbol}: {e}")
+        print("⚠️ Error fetching position:", e)
         return None
 
 
-# ==========================
-# 🔹 Order Execution
-# ==========================
-def open_position(symbol, side):
-    set_leverage_and_margin(symbol)
-    qty = calculate_quantity(symbol, TRADE_AMOUNT)
-    r = binance_signed_request("POST", "/fapi/v1/order", {
+def execute_order(symbol, side, quantity, order_type="MARKET", price=None):
+    """Place a futures order"""
+    params = {
         "symbol": symbol,
         "side": side,
-        "type": "MARKET",
-        "quantity": qty
-    })
-    print(f"✅ ENTRY {side}: {symbol}, Qty: {qty}")
-    return r
+        "type": order_type,
+        "quantity": quantity,
+    }
+    if order_type == "LIMIT" and price:
+        params["price"] = price
+        params["timeInForce"] = "GTC"
+
+    response = binance_request("POST", "/fapi/v1/order", params)
+    print(f"🟢 Order Response: {response}")
+    return response
 
 
-def close_position(symbol, side, price):
-    """Close position based on order type (LIMIT or MARKET)."""
-    close_side = "SELL" if side == "BUY" else "BUY"
-    qty = abs(get_open_position(symbol))
-    if qty == 0:
-        print(f"🚫 No open position to close for {symbol}. Cancelling orders...")
-        cancel_open_orders(symbol)
-        return {"status": "no_position"}
-
-    order_type = os.getenv("EXIT_ORDER_TYPE", "LIMIT").upper()
-    delay = int(os.getenv("EXIT_ORDER_DELAY", "2"))
-
-    if order_type == "MARKET":
-        print(f"🕒 Waiting {delay}s before MARKET exit to capture better price...")
-        time.sleep(delay)
-        params = {
-            "symbol": symbol,
-            "side": close_side,
-            "type": "MARKET",
-            "quantity": qty
-        }
-    else:
-        params = {
-            "symbol": symbol,
-            "side": close_side,
-            "type": "LIMIT",
-            "price": price,
-            "quantity": qty,
-            "timeInForce": "GTC"
-        }
-
-    r = binance_signed_request("POST", "/fapi/v1/order", params)
-    print(f"✖️ EXIT {close_side} {order_type}: {symbol} @ {price}, Qty: {qty}")
-    return r
-
-
-# ==========================
-# 🔹 Webhook Endpoint
-# ==========================
+# =========================
+# MAIN ROUTE
+# =========================
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.get_data(as_text=True)
+    data = request.get_json(force=True)
+    if not data or "message" not in data:
+        return jsonify({"status": "error", "message": "Invalid payload"}), 400
+
+    message = data["message"]
+    print(f"📩 Received: {message}")
+
     try:
-        ticker, comment, close_price, interval = data.split('|')
-        symbol = ticker.replace("USDT", "") + "USDT"
-        close_price = float(close_price)
-
-        if "LONG" in comment and "EXIT" not in comment:
-            r = open_position(symbol, "BUY")
-        elif "SHORT" in comment and "EXIT" not in comment:
-            r = open_position(symbol, "SELL")
-        elif "EXIT_LONG" in comment:
-            r = close_position(symbol, "BUY", close_price)
-        elif "EXIT_SHORT" in comment:
-            r = close_position(symbol, "SELL", close_price)
-        else:
-            r = {"error": "Unknown comment"}
-
-        return jsonify({"status": "ok", "response": r})
-
+        ticker, comment, price, interval = message.split("|")
+        symbol = ticker.upper().replace("USDT", "") + "USDT"
+        direction = comment.upper().strip()  # "LONG", "SHORT", "EXIT"
     except Exception as e:
-        print("❌ Error in webhook:", e)
-        return jsonify({"error": str(e)})
+        print("⚠️ Message parsing failed:", e)
+        return jsonify({"status": "error", "message": "Invalid format"}), 400
+
+    # ============ EXIT LOGIC ============
+    if direction == "EXIT":
+        position = get_open_position(symbol)
+        if not position:
+            print(f"❌ No open position found for {symbol}, skipping EXIT.")
+            return jsonify({"status": "skipped", "reason": "no open position"})
+
+        amt = abs(float(position["positionAmt"]))
+        side = "SELL" if float(position["positionAmt"]) > 0 else "BUY"
+
+        # Apply delay for MARKET exit
+        if EXIT_ORDER_TYPE == "MARKET" and EXIT_DELAY_SEC > 0:
+            print(f"⏳ Waiting {EXIT_DELAY_SEC}s before MARKET exit to capture better price...")
+            time.sleep(EXIT_DELAY_SEC)
+
+        print(f"🔻 Exiting {symbol} | Side={side} | Qty={amt} | Type={EXIT_ORDER_TYPE}")
+        result = execute_order(symbol, side, amt, order_type=EXIT_ORDER_TYPE)
+        return jsonify({"status": "exit_order_placed", "response": result})
+
+    # ============ ENTRY LOGIC ============
+    elif direction in ["LONG", "SHORT"]:
+        # Check active trade count
+        active_trades = get_active_trades()
+        if active_trades >= MAX_ACTIVE_TRADES:
+            print(f"⚠️ Max active trades ({MAX_ACTIVE_TRADES}) reached — skipping entry.")
+            return jsonify({"status": "blocked", "reason": "max trades reached"})
+
+        side = "BUY" if direction == "LONG" else "SELL"
+        qty = 0.001  # example quantity (adjust per your config)
+        print(f"🟢 Entry {symbol} | Side={side} | Qty={qty}")
+
+        result = execute_order(symbol, side, qty)
+        return jsonify({"status": "entry_order_placed", "response": result})
+
+    else:
+        print(f"⚠️ Unknown signal direction: {direction}")
+        return jsonify({"status": "error", "message": "unknown direction"}), 400
 
 
-# ==========================
-# 🔹 Ping + Keep Alive
-# ==========================
-@app.route('/ping', methods=['GET'])
-def ping():
-    return "pong", 200
-
-
-PING_INTERVAL = 5 * 60  # 5 minutes
-
-def self_ping():
-    while True:
-        try:
-            print("🔄 Self-ping to keep bot alive...")
-            requests.get(f"https://tradingview-binance-2o1v.onrender.com/ping")
-        except Exception as e:
-            print("❌ Self-ping failed:", e)
-        time.sleep(PING_INTERVAL)
-
-threading.Thread(target=self_ping, daemon=True).start()
-
-# ==========================
-# 🔹 Run Flask
-# ==========================
+# =========================
+# RUN SERVER
+# =========================
 if __name__ == '__main__':
-    port = int(os.getenv("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
