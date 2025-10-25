@@ -28,14 +28,12 @@ else:
 TRADE_AMOUNT      = float(os.getenv("TRADE_AMOUNT", "50"))
 LEVERAGE          = int(os.getenv("LEVERAGE", "20"))
 MARGIN_TYPE       = os.getenv("MARGIN_TYPE", "ISOLATED")
-LOG_FILLED_PRICE  = True   # log actual market order fill price
+LOG_FILLED_PRICE  = True  # log actual market order fill price
 
 EXIT_ORDER_TYPE   = os.getenv("EXIT_ORDER_TYPE", "LIMIT")  # LIMIT or MARKET
-EXIT_ORDER_DELAY  = int(os.getenv("EXIT_ORDER_DELAY", "5")) # in seconds, for MARKET exit
+EXIT_ORDER_DELAY  = int(os.getenv("EXIT_ORDER_DELAY", "5")) # seconds, for MARKET exit
 
 # =========================
-# TRADE CONTROL SETTINGS
+# 🔹 TRADE CONTROL SETTINGS
 # =========================
 MAX_ACTIVE_TRADES = int(os.getenv("MAX_ACTIVE_TRADES", 5))
-
-
