@@ -33,3 +33,9 @@ LOG_FILLED_PRICE  = True   # log actual market order fill price
 EXIT_ORDER_TYPE   = os.getenv("EXIT_ORDER_TYPE", "LIMIT")  # LIMIT or MARKET
 EXIT_ORDER_DELAY  = int(os.getenv("EXIT_ORDER_DELAY", "5")) # in seconds, for MARKET exit
 
+# =========================
+# TRADE CONTROL SETTINGS
+# =========================
+MAX_ACTIVE_TRADES = int(os.getenv("MAX_ACTIVE_TRADES", 5))
+
+
