@@ -27,7 +27,7 @@ else:
 # ==============================
 TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "50"))
 LEVERAGE     = int(os.getenv("LEVERAGE", "20"))
-MARGIN_TYPE  = os.getenv("MARGIN_TYPE", "ISOLATED")
+MARGIN_TYPE  = os.getenv("MARGIN_TYPE", "CROSS")
 
 # ==============================
 # 🔹 EXIT ORDER PARAMETERS
