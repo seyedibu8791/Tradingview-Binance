@@ -7,7 +7,7 @@ app = Flask(__name__)
 
 # ===== ENV SETTINGS =====
 EXIT_ORDER_TYPE = os.getenv("EXIT_ORDER_TYPE", "LIMIT").upper()  # LIMIT or MARKET
-EXIT_TIMEOUT_SEC = int(os.getenv("EXIT_TIMEOUT_SEC", "10"))      # Timeout for limit exit
+EXIT_TIMEOUT_SEC = int(os.getenv("EXIT_TIMEOUT_SEC", "01"))      # Timeout for limit exit
 
 # ===== Binance Helpers =====
 def binance_signed_request(http_method, path, params=None):
