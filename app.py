@@ -34,6 +34,7 @@ def set_leverage_and_margin(symbol):
 
 # ===== Symbol Info =====
 SYMBOL_INFO_CACHE = {}
+OPEN_LIMIT_ORDERS = {}  # Track pending LIMIT entries per symbol
 
 def get_symbol_info(symbol):
     if symbol in SYMBOL_INFO_CACHE:
@@ -62,7 +63,7 @@ def calculate_quantity(symbol):
     try:
         price_data = requests.get(f"{BASE_URL}/fapi/v1/ticker/price", params={"symbol": symbol}).json()
         price = float(price_data["price"])
-        position_value = TRADE_AMOUNT * LEVERAGE  # total $ value of position
+        position_value = TRADE_AMOUNT * LEVERAGE
         qty = position_value / price
         qty = round_quantity(symbol, qty)
         return qty
@@ -70,8 +71,17 @@ def calculate_quantity(symbol):
         print("❌ Failed to calculate quantity:", e)
         return 0.001
 
-def open_position(symbol, side):
-    # Cancel existing open position (if any)
+def cancel_limit_entry(symbol):
+    """Cancel pending LIMIT entry if exists"""
+    order_id = OPEN_LIMIT_ORDERS.get(symbol)
+    if order_id:
+        binance_signed_request("DELETE", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
+        print(f"⚠️ Pending LIMIT entry for {symbol} canceled")
+        OPEN_LIMIT_ORDERS.pop(symbol, None)
+
+def open_position(symbol, side, limit_price):
+    """Place a LIMIT order using TradingView alert price"""
+    # Cancel any existing open position if needed
     pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
     if pos_data and float(pos_data[0]["positionAmt"]) != 0:
         close_side = "SELL" if float(pos_data[0]["positionAmt"]) > 0 else "BUY"
@@ -81,26 +91,33 @@ def open_position(symbol, side):
     set_leverage_and_margin(symbol)
     qty = calculate_quantity(symbol)
 
+    # Place LIMIT order
     retries = 3
+    response = None
     while retries > 0:
         response = binance_signed_request("POST", "/fapi/v1/order", {
             "symbol": symbol,
             "side": side,
-            "type": "MARKET",
-            "quantity": qty
+            "type": "LIMIT",
+            "timeInForce": "GTC",
+            "quantity": qty,
+            "price": limit_price
         })
         if "orderId" in response:
+            OPEN_LIMIT_ORDERS[symbol] = response["orderId"]
             break
         else:
-            print("❌ Entry failed, retrying...", response)
+            print("❌ Limit Entry failed, retrying...", response)
             retries -= 1
             time.sleep(1)
 
-    filled_price = response.get("avgFillPrice") or (response.get("fills", [{}])[0].get("price"))
-    print(f"📊 {side} ENTRY: {symbol}, Qty: {qty}, Filled Price: {filled_price}")
+    print(f"📊 {side} LIMIT ENTRY: {symbol}, Qty: {qty}, Price: {limit_price}")
     return response
 
 def close_position(symbol, side, price):
+    # Cancel pending LIMIT entry if exists
+    cancel_limit_entry(symbol)
+
     close_side = "SELL" if side == "BUY" else "BUY"
     pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
 
@@ -111,7 +128,7 @@ def close_position(symbol, side, price):
     qty = abs(float(pos_data[0]["positionAmt"]))
     qty = round_quantity(symbol, qty)
 
-    print(f"⏳ Waiting {EXIT_MARKET_DELAY}s before MARKET exit to capture price...")
+    print(f"⏳ Waiting {EXIT_MARKET_DELAY}s before MARKET exit to capture better price...")
     time.sleep(EXIT_MARKET_DELAY)
 
     response = binance_signed_request("POST", "/fapi/v1/order", {
@@ -124,7 +141,7 @@ def close_position(symbol, side, price):
     print(f"✖️ {close_side} MARKET EXIT: {symbol}, Qty: {qty}")
     return response
 
-# ===== Webhook Endpoint =====
+# ===== Webhook =====
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_data(as_text=True)
@@ -134,9 +151,9 @@ def webhook():
         close_price = float(close_price)
 
         if comment == "BUY_ENTRY":
-            r = open_position(symbol, "BUY")
+            r = open_position(symbol, "BUY", close_price)
         elif comment == "SELL_ENTRY":
-            r = open_position(symbol, "SELL")
+            r = open_position(symbol, "SELL", close_price)
         elif comment == "EXIT_LONG":
             r = close_position(symbol, "BUY", close_price)
         elif comment == "EXIT_SHORT":
@@ -150,12 +167,12 @@ def webhook():
         print("❌ Webhook Error:", e)
         return jsonify({"error": str(e)})
 
-# ===== Ping Endpoint =====
+# ===== Ping =====
 @app.route('/ping', methods=['GET'])
 def ping():
     return "pong", 200
 
-# ===== Self-Ping Thread =====
+# ===== Self Ping =====
 PING_INTERVAL = 5 * 60
 def self_ping():
     while True:
