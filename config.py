@@ -34,4 +34,4 @@ MARGIN_TYPE  = os.getenv("MARGIN_TYPE", "CROSS")
 # ==============================
 EXIT_ORDER_TYPE      = os.getenv("EXIT_ORDER_TYPE", "LIMIT")  # LIMIT or MARKET
 EXIT_TIMEOUT_SEC     = int(os.getenv("EXIT_TIMEOUT_SEC", "1")) # seconds to wait for LIMIT exit
-EXIT_MARKET_DELAY    = int(os.getenv("EXIT_MARKET_DELAY", "10")) # seconds delay before MARKET exit to capture price
+EXIT_MARKET_DELAY    = int(os.getenv("EXIT_MARKET_DELAY", "20")) # seconds delay before MARKET exit to capture price
