@@ -62,17 +62,20 @@ def round_quantity(symbol, qty):
         qty = min_qty
     return round(qty, 8)
 
-def calculate_quantity(symbol, usdt_value):
+# ===== Order Execution =====
+def calculate_quantity(symbol):
+    """Calculate quantity using TRADE_AMOUNT x LEVERAGE for total position size"""
     try:
         price_data = requests.get(f"{BASE_URL}/fapi/v1/ticker/price", params={"symbol": symbol}).json()
         price = float(price_data["price"])
-        qty = usdt_value / price
+        position_value = TRADE_AMOUNT * LEVERAGE          # total $ value of position
+        qty = position_value / price                       # quantity in symbol units
         qty = round_quantity(symbol, qty)
         return qty
-    except:
+    except Exception as e:
+        print("❌ Failed to calculate quantity:", e)
         return 0.001
 
-# ===== Order Execution =====
 def open_position(symbol, side):
     # Cancel pending exit if new entry arrives
     if symbol in OPEN_EXIT_ORDERS:
@@ -84,7 +87,8 @@ def open_position(symbol, side):
             close_position(symbol, "BUY" if close_side=="SELL" else "SELL", 0)  # market close
 
     set_leverage_and_margin(symbol)
-    qty = calculate_quantity(symbol, TRADE_AMOUNT)
+    qty = calculate_quantity(symbol)
+
     retries = 3
     while retries > 0:
         response = binance_signed_request("POST", "/fapi/v1/order", {
@@ -99,6 +103,7 @@ def open_position(symbol, side):
             print("❌ Entry failed, retrying...", response)
             retries -= 1
             time.sleep(1)
+
     filled_price = response.get("avgFillPrice") or (response.get("fills", [{}])[0].get("price"))
     print(f"📊 {side} ENTRY: {symbol}, Qty: {qty}, Filled Price: {filled_price}")
     return response
