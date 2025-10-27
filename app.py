@@ -34,7 +34,9 @@ def set_leverage_and_margin(symbol):
 
 # ===== Symbol Info =====
 SYMBOL_INFO_CACHE = {}
-OPEN_LIMIT_ORDERS = {}  # Track pending LIMIT entries per symbol
+OPEN_LIMIT_ORDERS = {}       # Pending LIMIT orders
+PENDING_EXITS = {}           # Track symbols currently in exit delay
+EXIT_LOCK = threading.Lock() # Lock to handle simultaneous exit/entry
 
 def get_symbol_info(symbol):
     if symbol in SYMBOL_INFO_CACHE:
@@ -70,7 +72,7 @@ def count_active_trades():
 
 # ===== Order Execution =====
 def calculate_quantity(symbol):
-    """Calculate quantity using TRADE_AMOUNT x LEVERAGE for total position size"""
+    """Calculate quantity using TRADE_AMOUNT x LEVERAGE"""
     try:
         price_data = requests.get(f"{BASE_URL}/fapi/v1/ticker/price", params={"symbol": symbol}).json()
         price = float(price_data["price"])
@@ -98,27 +100,69 @@ def check_partial_fill(symbol):
     order_id = OPEN_LIMIT_ORDERS.get(symbol)
     if not order_id:
         return False
-
     order_info = binance_signed_request("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
     if order_info.get("status") in ["FILLED", "PARTIALLY_FILLED"]:
         print(f"✅ {symbol} order is partially/fully filled. Trade considered active.")
         return True
     return False
 
+def execute_market_exit(symbol, side):
+    """Send MARKET exit immediately"""
+    pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
+    if not pos_data or abs(float(pos_data[0]["positionAmt"])) == 0:
+        print(f"⚠️ No open position for {symbol}, skipping immediate exit.")
+        return {"status": "no_position"}
+
+    qty = abs(float(pos_data[0]["positionAmt"]))
+    qty = round_quantity(symbol, qty)
+    close_side = "SELL" if side == "BUY" else "BUY"
+
+    response = binance_signed_request("POST", "/fapi/v1/order", {
+        "symbol": symbol,
+        "side": close_side,
+        "type": "MARKET",
+        "quantity": qty
+    })
+    print(f"✖️ Immediate {close_side} MARKET EXIT: {symbol}, Qty: {qty}")
+    return response
+
+def close_position(symbol, side, price):
+    """Cancel pending LIMIT and close any open position with delay"""
+    cancel_limit_entry(symbol)
+    check_partial_fill(symbol)
+
+    with EXIT_LOCK:
+        PENDING_EXITS[symbol] = True
+
+    def delayed_exit():
+        time.sleep(EXIT_MARKET_DELAY)
+        execute_market_exit(symbol, side)
+        with EXIT_LOCK:
+            PENDING_EXITS[symbol] = False
+
+    threading.Thread(target=delayed_exit, daemon=True).start()
+    print(f"⏳ Delayed MARKET exit scheduled for {symbol} in {EXIT_MARKET_DELAY}s")
+
 def open_position(symbol, side, limit_price):
     """Place a LIMIT order using TradingView alert price"""
-    
+
     # ✅ Check max active trades
     active_count = count_active_trades()
     if active_count >= MAX_ACTIVE_TRADES:
         print(f"🚫 Trade limit reached ({active_count}/{MAX_ACTIVE_TRADES}). Skipping {symbol} {side}.")
         return {"status": "max_trades_reached", "active_trades": active_count}
 
-    # Close any existing position if needed
+    # ✅ Immediate exit if pending exit exists
+    with EXIT_LOCK:
+        if PENDING_EXITS.get(symbol):
+            print(f"⚠️ New entry for {symbol} during exit delay → executing immediate exit first.")
+            execute_market_exit(symbol, side="BUY" if side=="SELL" else "SELL")
+            PENDING_EXITS[symbol] = False
+
+    # Close existing position if any
     pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
     if pos_data and float(pos_data[0]["positionAmt"]) != 0:
         close_side = "SELL" if float(pos_data[0]["positionAmt"]) > 0 else "BUY"
-        print(f"⚠️ Existing position detected for {symbol}, closing first...")
         close_position(symbol, close_side, 0)
 
     set_leverage_and_margin(symbol)
@@ -145,37 +189,6 @@ def open_position(symbol, side, limit_price):
             time.sleep(1)
 
     print(f"📊 {side} LIMIT ENTRY: {symbol}, Qty: {qty}, Price: {limit_price}")
-    return response
-
-def close_position(symbol, side, price):
-    """Cancel pending LIMIT and close any open (partial/full) position"""
-    # Cancel any pending limit entry first
-    cancel_limit_entry(symbol)
-
-    # Check if trade was partially filled (treat as open)
-    check_partial_fill(symbol)
-
-    close_side = "SELL" if side == "BUY" else "BUY"
-    pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
-
-    if not pos_data or abs(float(pos_data[0]["positionAmt"])) == 0:
-        print(f"⚠️ No open position for {symbol}, skipping exit.")
-        return {"status": "no_position"}
-
-    qty = abs(float(pos_data[0]["positionAmt"]))
-    qty = round_quantity(symbol, qty)
-
-    print(f"⏳ Waiting {EXIT_MARKET_DELAY}s before MARKET exit to capture better price...")
-    time.sleep(EXIT_MARKET_DELAY)
-
-    response = binance_signed_request("POST", "/fapi/v1/order", {
-        "symbol": symbol,
-        "side": close_side,
-        "type": "MARKET",
-        "quantity": qty
-    })
-
-    print(f"✖️ {close_side} MARKET EXIT: {symbol}, Qty: {qty}")
     return response
 
 # ===== Webhook =====
