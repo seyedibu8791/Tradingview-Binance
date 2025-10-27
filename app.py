@@ -5,10 +5,9 @@ from config import *
 app = Flask(__name__)
 
 # ===== Env / Exit Limit Settings =====
-# Use bar high/low for exit limit price when True
 USE_BAR_EXIT = os.getenv("USE_BAR_HIGH_LOW_EXIT", "True").lower() in ("1", "true", "yes")
-# How many seconds to wait for the LIMIT exit to fill before cancelling and doing MARKET exit
-EXIT_WAIT_LIMIT_SECS = int(os.getenv("EXIT_WAIT_LIMIT_SECS", "60"))
+EXIT_WAIT_LIMIT_SECS = int(os.getenv("EXIT_WAIT_LIMIT_SECS", "5"))
+OPPOSITE_CLOSE_DELAY = int(os.getenv("OPPOSITE_CLOSE_DELAY", "3"))  # ⏳ Delay (in seconds) before opening new position
 
 # ===== Binance Helpers =====
 def binance_signed_request(http_method, path, params=None):
@@ -40,10 +39,10 @@ def set_leverage_and_margin(symbol):
 
 # ===== Symbol Info =====
 SYMBOL_INFO_CACHE = {}
-OPEN_LIMIT_ORDERS = {}       # Pending LIMIT entry orders (symbol -> orderId)
-EXIT_LIMIT_ORDERS = {}       # Pending LIMIT exit orders (symbol -> orderId)
-EXIT_MONITORS = {}           # Monitor threads (symbol -> thread)
-EXIT_LOCK = threading.Lock() # Lock to handle simultaneous exit/entry
+OPEN_LIMIT_ORDERS = {}
+EXIT_LIMIT_ORDERS = {}
+EXIT_MONITORS = {}
+EXIT_LOCK = threading.Lock()
 
 def get_symbol_info(symbol):
     if symbol in SYMBOL_INFO_CACHE:
@@ -61,7 +60,6 @@ def round_quantity(symbol, qty):
         return round(qty, 3)
     step_size = float([f["stepSize"] for f in info["filters"] if f["filterType"] == "LOT_SIZE"][0])
     min_qty = float([f["minQty"] for f in info["filters"] if f["filterType"] == "LOT_SIZE"][0])
-    # align qty to step_size (avoid floating remainder issues)
     qty = (qty // step_size) * step_size
     if qty < min_qty:
         qty = min_qty
@@ -90,36 +88,6 @@ def calculate_quantity(symbol):
         print("❌ Failed to calculate quantity:", e)
         return 0.001
 
-def cancel_limit_entry(symbol):
-    order_id = OPEN_LIMIT_ORDERS.get(symbol)
-    if order_id:
-        try:
-            binance_signed_request("DELETE", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
-            print(f"⚠️ Pending LIMIT entry for {symbol} canceled")
-        except Exception as e:
-            print(f"❌ Failed to cancel pending LIMIT for {symbol}: {e}")
-        OPEN_LIMIT_ORDERS.pop(symbol, None)
-
-def cancel_exit_limit(symbol):
-    order_id = EXIT_LIMIT_ORDERS.get(symbol)
-    if order_id:
-        try:
-            binance_signed_request("DELETE", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
-            print(f"⚠️ Pending LIMIT exit for {symbol} canceled")
-        except Exception as e:
-            print(f"❌ Failed to cancel pending exit LIMIT for {symbol}: {e}")
-        EXIT_LIMIT_ORDERS.pop(symbol, None)
-
-def check_partial_fill(symbol):
-    order_id = OPEN_LIMIT_ORDERS.get(symbol)
-    if not order_id:
-        return False
-    order_info = binance_signed_request("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
-    if order_info.get("status") in ["FILLED", "PARTIALLY_FILLED"]:
-        print(f"✅ {symbol} order is partially/fully filled. Trade considered active.")
-        return True
-    return False
-
 def execute_market_exit(symbol, side):
     pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
     if not pos_data or abs(float(pos_data[0]["positionAmt"])) == 0:
@@ -139,161 +107,53 @@ def execute_market_exit(symbol, side):
     print(f"✖️ {close_side} MARKET EXIT executed for {symbol}, Qty: {qty}")
     return response
 
-# ===== Exit LIMIT monitor =====
-def monitor_exit_limit(symbol, order_id, side, qty):
-    """Wait up to EXIT_WAIT_LIMIT_SECS for the LIMIT exit to fill. If not filled -> cancel & MARKET exit."""
-    start = time.time()
-    while time.time() - start < EXIT_WAIT_LIMIT_SECS:
-        try:
-            status = binance_signed_request("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
-            if status.get("status") == "FILLED":
-                print(f"✅ LIMIT exit filled for {symbol} orderId={order_id}")
-                # Clear tracking
-                with EXIT_LOCK:
-                    EXIT_LIMIT_ORDERS.pop(symbol, None)
-                    EXIT_MONITORS.pop(symbol, None)
-                return
-            # if PARTIALLY_FILLED we still consider position partially closed; monitor until fully filled or timeout
-        except Exception as e:
-            print("❌ monitor_exit_limit error:", e)
-        time.sleep(1)
-
-    # Timeout reached -> cancel the limit and market exit
-    print(f"⏰ LIMIT exit timeout for {symbol}, cancelling LIMIT and executing MARKET exit")
+def close_existing_if_opposite(symbol, new_side):
+    """If an opposite position exists, close it first before opening new."""
     try:
-        binance_signed_request("DELETE", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
+        pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
+        if not pos_data:
+            return False
+        amt = float(pos_data[0]["positionAmt"])
+        if amt > 0 and new_side == "SELL":
+            print(f"🔁 Opposite signal detected — closing LONG before new SHORT for {symbol}")
+            execute_market_exit(symbol, "BUY")
+            print(f"⏳ Waiting {OPPOSITE_CLOSE_DELAY}s before opening new SHORT...")
+            time.sleep(OPPOSITE_CLOSE_DELAY)
+            return True
+        elif amt < 0 and new_side == "BUY":
+            print(f"🔁 Opposite signal detected — closing SHORT before new LONG for {symbol}")
+            execute_market_exit(symbol, "SELL")
+            print(f"⏳ Waiting {OPPOSITE_CLOSE_DELAY}s before opening new LONG...")
+            time.sleep(OPPOSITE_CLOSE_DELAY)
+            return True
+        return False
     except Exception as e:
-        print("❌ Failed to cancel unfilled LIMIT exit:", e)
-    with EXIT_LOCK:
-        EXIT_LIMIT_ORDERS.pop(symbol, None)
-        EXIT_MONITORS.pop(symbol, None)
-
-    # Execute market exit to ensure position closed
-    execute_market_exit(symbol, side)
-
-def close_position(symbol, side, price, bar_high=None, bar_low=None):
-    """
-    Attempt exit as LIMIT first (use bar_high for long, bar_low for short if USE_BAR_EXIT=True).
-    If LIMIT not filled within EXIT_WAIT_LIMIT_SECS -> cancel & market exit.
-    """
-    # Cancel any pending entry order
-    cancel_limit_entry(symbol)
-
-    # If a previous exit limit monitor exists, cancel it (we will replace)
-    with EXIT_LOCK:
-        existing_monitor = EXIT_MONITORS.get(symbol)
-        if existing_monitor and existing_monitor.is_alive():
-            print(f"⚠️ Cancelling existing exit monitor for {symbol} to start a new one.")
-            # cancel existing exit LIMIT order too
-            cancel_exit_limit(symbol)
-            # allow the old thread to finish on its own (it will find its order missing or be popped)
-
-    # If there's no open position, skip
-    pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
-    if not pos_data or abs(float(pos_data[0]["positionAmt"])) == 0:
-        print(f"⚠️ No open position for {symbol}, skipping exit.")
-        return {"status": "no_position"}
-
-    qty = abs(float(pos_data[0]["positionAmt"]))
-    qty = round_quantity(symbol, qty)
-    close_side = "SELL" if side == "BUY" else "BUY"
-
-    # Choose limit exit price
-    limit_price = None
-    if USE_BAR_EXIT and bar_high is not None and bar_low is not None:
-        if side == "BUY":
-            # exit long -> try to sell at bar's high
-            limit_price = float(bar_high)
-        else:
-            # exit short -> try to buy at bar's low
-            limit_price = float(bar_low)
-    else:
-        # fallback to provided price param (strategy.order.price or close)
-        limit_price = price
-
-    # Place LIMIT exit order with reduceOnly=true
-    try:
-        exit_resp = binance_signed_request("POST", "/fapi/v1/order", {
-            "symbol": symbol,
-            "side": close_side,
-            "type": "LIMIT",
-            "timeInForce": "GTC",
-            "quantity": qty,
-            "price": limit_price,
-            "reduceOnly": "true"
-        })
-    except Exception as e:
-        print("❌ Failed to place LIMIT exit order:", e)
-        exit_resp = {"error": str(e)}
-
-    if not isinstance(exit_resp, dict) or "orderId" not in exit_resp:
-        print(f"❌ LIMIT exit order failed for {symbol}:", exit_resp)
-        # fallback to immediate market exit
-        return execute_market_exit(symbol, side)
-
-    order_id = exit_resp["orderId"]
-    with EXIT_LOCK:
-        EXIT_LIMIT_ORDERS[symbol] = order_id
-
-    # Start monitor thread
-    t = threading.Thread(target=monitor_exit_limit, args=(symbol, order_id, side, qty), daemon=True)
-    with EXIT_LOCK:
-        EXIT_MONITORS[symbol] = t
-    t.start()
-    print(f"📨 LIMIT exit placed for {symbol} @ {limit_price} (orderId={order_id}) — waiting {EXIT_WAIT_LIMIT_SECS}s for fill")
-    return exit_resp
+        print("❌ Failed to close opposite position:", e)
+        return False
 
 def open_position(symbol, side, limit_price):
-    """Place a LIMIT entry using TradingView alert price"""
     active_count = count_active_trades()
     if active_count >= MAX_ACTIVE_TRADES:
         print(f"🚫 Trade limit reached ({active_count}/{MAX_ACTIVE_TRADES}). Skipping {symbol} {side}.")
         return {"status": "max_trades_reached", "active_trades": active_count}
 
-    # If an exit limit is pending for this symbol, cancel it and execute immediate market exit
-    with EXIT_LOCK:
-        pending_exit_id = EXIT_LIMIT_ORDERS.get(symbol)
-        pending_monitor = EXIT_MONITORS.get(symbol)
-        if pending_exit_id:
-            print(f"⚠️ New entry for {symbol} detected while exit pending — cancelling exit LIMIT and executing MARKET exit first.")
-            cancel_exit_limit(symbol)
-            # if monitor thread exists, we leave it; monitor will find order missing and exit.
-            # execute immediate market exit to ensure closure
-            execute_market_exit(symbol, side="BUY" if side=="SELL" else "SELL")
-            # clear monitor if present
-            if pending_monitor and pending_monitor.is_alive():
-                EXIT_MONITORS.pop(symbol, None)
-            EXIT_LIMIT_ORDERS.pop(symbol, None)
-
-    # Close existing position if any (ensures single position per symbol)
-    pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
-    if pos_data and float(pos_data[0]["positionAmt"]) != 0:
-        close_side = "SELL" if float(pos_data[0]["positionAmt"]) > 0 else "BUY"
-        close_position(symbol, close_side, 0)
-
+    close_existing_if_opposite(symbol, side)
     set_leverage_and_margin(symbol)
     qty = calculate_quantity(symbol)
 
-    retries = 3
-    response = None
-    while retries > 0:
-        response = binance_signed_request("POST", "/fapi/v1/order", {
-            "symbol": symbol,
-            "side": side,
-            "type": "LIMIT",
-            "timeInForce": "GTC",
-            "quantity": qty,
-            "price": limit_price
-        })
-        if isinstance(response, dict) and "orderId" in response:
-            OPEN_LIMIT_ORDERS[symbol] = response["orderId"]
-            break
-        else:
-            print("❌ Limit Entry failed, retrying...", response)
-            retries -= 1
-            time.sleep(1)
-
-    print(f"📊 {side} LIMIT ENTRY: {symbol}, Qty: {qty}, Price: {limit_price}")
+    response = binance_signed_request("POST", "/fapi/v1/order", {
+        "symbol": symbol,
+        "side": side,
+        "type": "LIMIT",
+        "timeInForce": "GTC",
+        "quantity": qty,
+        "price": limit_price
+    })
+    if "orderId" in response:
+        OPEN_LIMIT_ORDERS[symbol] = response["orderId"]
+        print(f"📊 {side} LIMIT ENTRY: {symbol}, Qty: {qty}, Price: {limit_price}")
+    else:
+        print(f"❌ Entry failed for {symbol}: {response}")
     return response
 
 # ===== Webhook =====
@@ -301,41 +161,35 @@ def open_position(symbol, side, limit_price):
 def webhook():
     data = request.get_data(as_text=True)
     try:
-        # Backwards-compatible parsing:
-        # supported forms:
-        # 1) ticker|comment|close|interval
-        # 2) ticker|comment|close|high|low|interval
-        parts = data.split('|')
-        # normalize whitespace
-        parts = [p.strip() for p in parts]
-
-        if len(parts) == 4:
-            ticker, comment, close_price, interval = parts
-            bar_high = bar_low = None
-        elif len(parts) >= 6:
+        parts = [p.strip() for p in data.split('|')]
+        if len(parts) >= 6:
             ticker, comment, close_price, bar_high, bar_low, interval = parts[:6]
         else:
-            # fallback: attempt 4-split and ignore extra
             ticker, comment, close_price, interval = parts[0], parts[1], parts[2], parts[-1]
             bar_high = bar_low = None
 
         symbol = ticker.replace("USDT", "") + "USDT"
         close_price = float(close_price)
-        bar_high = float(bar_high) if (bar_high is not None and bar_high != "") else None
-        bar_low = float(bar_low) if (bar_low is not None and bar_low != "") else None
+        bar_high = float(bar_high) if bar_high else None
+        bar_low = float(bar_low) if bar_low else None
 
-        if comment == "BUY_ENTRY":
+        # 🔹 Handle signal types
+        if comment in ["BUY_ENTRY", "CROSS_EXIT_SHORT"]:
+            close_existing_if_opposite(symbol, "BUY")
             r = open_position(symbol, "BUY", close_price)
-        elif comment == "SELL_ENTRY":
+
+        elif comment in ["SELL_ENTRY", "CROSS_EXIT_LONG"]:
+            close_existing_if_opposite(symbol, "SELL")
             r = open_position(symbol, "SELL", close_price)
+
         elif comment == "EXIT_LONG":
-            # For long exit: use bar_high as limit (if provided and USE_BAR_EXIT enabled)
-            r = close_position(symbol, "BUY", close_price, bar_high=bar_high, bar_low=bar_low)
+            r = execute_market_exit(symbol, "BUY")
+
         elif comment == "EXIT_SHORT":
-            # For short exit: use bar_low as limit
-            r = close_position(symbol, "SELL", close_price, bar_high=bar_high, bar_low=bar_low)
+            r = execute_market_exit(symbol, "SELL")
+
         else:
-            r = {"error": "Unknown comment"}
+            r = {"error": f"Unknown comment: {comment}"}
 
         return jsonify({"status": "ok", "response": r})
 
