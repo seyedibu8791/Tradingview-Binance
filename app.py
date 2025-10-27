@@ -57,6 +57,17 @@ def round_quantity(symbol, qty):
         qty = min_qty
     return round(qty, 8)
 
+# ===== Active Trades =====
+def count_active_trades():
+    """Return number of currently open positions"""
+    try:
+        positions = binance_signed_request("GET", "/fapi/v2/positionRisk")
+        active_positions = [p for p in positions if abs(float(p["positionAmt"])) > 0]
+        return len(active_positions)
+    except Exception as e:
+        print("❌ Failed to fetch active trades:", e)
+        return 0
+
 # ===== Order Execution =====
 def calculate_quantity(symbol):
     """Calculate quantity using TRADE_AMOUNT x LEVERAGE for total position size"""
@@ -75,13 +86,35 @@ def cancel_limit_entry(symbol):
     """Cancel pending LIMIT entry if exists"""
     order_id = OPEN_LIMIT_ORDERS.get(symbol)
     if order_id:
-        binance_signed_request("DELETE", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
-        print(f"⚠️ Pending LIMIT entry for {symbol} canceled")
+        try:
+            binance_signed_request("DELETE", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
+            print(f"⚠️ Pending LIMIT entry for {symbol} canceled")
+        except Exception as e:
+            print(f"❌ Failed to cancel pending LIMIT for {symbol}: {e}")
         OPEN_LIMIT_ORDERS.pop(symbol, None)
+
+def check_partial_fill(symbol):
+    """Check if LIMIT order is partially filled; if so, treat as open position"""
+    order_id = OPEN_LIMIT_ORDERS.get(symbol)
+    if not order_id:
+        return False
+
+    order_info = binance_signed_request("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
+    if order_info.get("status") in ["FILLED", "PARTIALLY_FILLED"]:
+        print(f"✅ {symbol} order is partially/fully filled. Trade considered active.")
+        return True
+    return False
 
 def open_position(symbol, side, limit_price):
     """Place a LIMIT order using TradingView alert price"""
-    # Cancel any existing open position if needed
+    
+    # ✅ Check max active trades
+    active_count = count_active_trades()
+    if active_count >= MAX_ACTIVE_TRADES:
+        print(f"🚫 Trade limit reached ({active_count}/{MAX_ACTIVE_TRADES}). Skipping {symbol} {side}.")
+        return {"status": "max_trades_reached", "active_trades": active_count}
+
+    # Close any existing position if needed
     pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
     if pos_data and float(pos_data[0]["positionAmt"]) != 0:
         close_side = "SELL" if float(pos_data[0]["positionAmt"]) > 0 else "BUY"
@@ -115,13 +148,17 @@ def open_position(symbol, side, limit_price):
     return response
 
 def close_position(symbol, side, price):
-    # Cancel pending LIMIT entry if exists
+    """Cancel pending LIMIT and close any open (partial/full) position"""
+    # Cancel any pending limit entry first
     cancel_limit_entry(symbol)
+
+    # Check if trade was partially filled (treat as open)
+    check_partial_fill(symbol)
 
     close_side = "SELL" if side == "BUY" else "BUY"
     pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
 
-    if not pos_data or float(pos_data[0]["positionAmt"]) == 0:
+    if not pos_data or abs(float(pos_data[0]["positionAmt"])) == 0:
         print(f"⚠️ No open position for {symbol}, skipping exit.")
         return {"status": "no_position"}
 
