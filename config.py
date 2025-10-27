@@ -30,6 +30,9 @@ LEVERAGE     = int(os.getenv("LEVERAGE", "20"))         # Leverage multiplier
 MARGIN_TYPE  = os.getenv("MARGIN_TYPE", "ISOLATED")     # CROSS or ISOLATED
 MAX_ACTIVE_TRADES = int(os.getenv("MAX_ACTIVE_TRADES", "5"))  # Limit active trades
 
+# Delay (in seconds) between closing opposite position and opening new one
+OPPOSITE_CLOSE_DELAY = int(os.getenv("OPPOSITE_CLOSE_DELAY", "3"))
+
 # ==============================
 # 🔹 EXIT ORDER PARAMETERS
 # ==============================
@@ -62,12 +65,13 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")  # INFO, DEBUG, ERROR
 print(f"""
 📘 CONFIGURATION LOADED
 ------------------------------
-Environment:   {"TESTNET" if USE_TESTNET else "LIVE"}
-Leverage:      {LEVERAGE}x ({MARGIN_TYPE})
-Trade Amount:  ${TRADE_AMOUNT}
-Exit Delay:    {EXIT_MARKET_DELAY}s
-Exit Limit→MKT: {EXIT_LIMIT_TIMEOUT}s
-Use Bar High/Low: {USE_BAR_HIGH_LOW_FOR_EXIT}
-Max Active Trades: {MAX_ACTIVE_TRADES}
+Environment:           {"TESTNET" if USE_TESTNET else "LIVE"}
+Leverage:              {LEVERAGE}x ({MARGIN_TYPE})
+Trade Amount:          ${TRADE_AMOUNT}
+Exit Delay:            {EXIT_MARKET_DELAY}s
+Exit Limit→MKT:        {EXIT_LIMIT_TIMEOUT}s
+Use Bar High/Low:      {USE_BAR_HIGH_LOW_FOR_EXIT}
+Opposite Close Delay:  {OPPOSITE_CLOSE_DELAY}s
+Max Active Trades:     {MAX_ACTIVE_TRADES}
 ------------------------------
 """)
