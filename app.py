@@ -35,7 +35,7 @@ def set_leverage_and_margin(symbol):
 # ===== Symbol Info =====
 SYMBOL_INFO_CACHE = {}
 OPEN_LIMIT_ORDERS = {}       # Pending LIMIT orders
-PENDING_EXITS = {}           # Track symbols currently in exit delay
+EXIT_THREADS = {}            # Track exit threads per symbol
 EXIT_LOCK = threading.Lock() # Lock to handle simultaneous exit/entry
 
 def get_symbol_info(symbol):
@@ -61,7 +61,6 @@ def round_quantity(symbol, qty):
 
 # ===== Active Trades =====
 def count_active_trades():
-    """Return number of currently open positions"""
     try:
         positions = binance_signed_request("GET", "/fapi/v2/positionRisk")
         active_positions = [p for p in positions if abs(float(p["positionAmt"])) > 0]
@@ -72,7 +71,6 @@ def count_active_trades():
 
 # ===== Order Execution =====
 def calculate_quantity(symbol):
-    """Calculate quantity using TRADE_AMOUNT x LEVERAGE"""
     try:
         price_data = requests.get(f"{BASE_URL}/fapi/v1/ticker/price", params={"symbol": symbol}).json()
         price = float(price_data["price"])
@@ -85,7 +83,6 @@ def calculate_quantity(symbol):
         return 0.001
 
 def cancel_limit_entry(symbol):
-    """Cancel pending LIMIT entry if exists"""
     order_id = OPEN_LIMIT_ORDERS.get(symbol)
     if order_id:
         try:
@@ -96,7 +93,6 @@ def cancel_limit_entry(symbol):
         OPEN_LIMIT_ORDERS.pop(symbol, None)
 
 def check_partial_fill(symbol):
-    """Check if LIMIT order is partially filled; if so, treat as open position"""
     order_id = OPEN_LIMIT_ORDERS.get(symbol)
     if not order_id:
         return False
@@ -107,10 +103,9 @@ def check_partial_fill(symbol):
     return False
 
 def execute_market_exit(symbol, side):
-    """Send MARKET exit immediately"""
     pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
     if not pos_data or abs(float(pos_data[0]["positionAmt"])) == 0:
-        print(f"⚠️ No open position for {symbol}, skipping immediate exit.")
+        print(f"⚠️ No open position for {symbol}, skipping exit.")
         return {"status": "no_position"}
 
     qty = abs(float(pos_data[0]["positionAmt"]))
@@ -123,41 +118,54 @@ def execute_market_exit(symbol, side):
         "type": "MARKET",
         "quantity": qty
     })
-    print(f"✖️ Immediate {close_side} MARKET EXIT: {symbol}, Qty: {qty}")
+    print(f"✖️ {close_side} MARKET EXIT executed for {symbol}, Qty: {qty}")
     return response
 
 def close_position(symbol, side, price):
-    """Cancel pending LIMIT and close any open position with delay"""
+    """Cancel pending LIMIT and schedule delayed MARKET exit (interruptible)"""
     cancel_limit_entry(symbol)
     check_partial_fill(symbol)
 
-    with EXIT_LOCK:
-        PENDING_EXITS[symbol] = True
-
     def delayed_exit():
-        time.sleep(EXIT_MARKET_DELAY)
+        sleep_time = EXIT_MARKET_DELAY
+        while sleep_time > 0:
+            time.sleep(1)
+            sleep_time -= 1
+            with EXIT_LOCK:
+                # If interrupted by new entry, exit immediately
+                if EXIT_THREADS.get(symbol) != threading.current_thread():
+                    print(f"⚠️ Exit for {symbol} interrupted by new entry.")
+                    return
         execute_market_exit(symbol, side)
         with EXIT_LOCK:
-            PENDING_EXITS[symbol] = False
+            EXIT_THREADS.pop(symbol, None)
 
-    threading.Thread(target=delayed_exit, daemon=True).start()
-    print(f"⏳ Delayed MARKET exit scheduled for {symbol} in {EXIT_MARKET_DELAY}s")
+    with EXIT_LOCK:
+        # Kill any existing exit thread
+        existing_thread = EXIT_THREADS.get(symbol)
+        if existing_thread and existing_thread.is_alive():
+            print(f"⚠️ Existing exit for {symbol} interrupted by new exit signal.")
+            # Mark old thread to stop
+            EXIT_THREADS[symbol] = None
+
+        t = threading.Thread(target=delayed_exit, daemon=True)
+        EXIT_THREADS[symbol] = t
+        t.start()
+        print(f"⏳ Delayed MARKET exit scheduled for {symbol} in {EXIT_MARKET_DELAY}s")
 
 def open_position(symbol, side, limit_price):
-    """Place a LIMIT order using TradingView alert price"""
-
-    # ✅ Check max active trades
     active_count = count_active_trades()
     if active_count >= MAX_ACTIVE_TRADES:
         print(f"🚫 Trade limit reached ({active_count}/{MAX_ACTIVE_TRADES}). Skipping {symbol} {side}.")
         return {"status": "max_trades_reached", "active_trades": active_count}
 
-    # ✅ Immediate exit if pending exit exists
+    # If an exit thread exists, force immediate exit before new entry
     with EXIT_LOCK:
-        if PENDING_EXITS.get(symbol):
-            print(f"⚠️ New entry for {symbol} during exit delay → executing immediate exit first.")
+        existing_exit = EXIT_THREADS.get(symbol)
+        if existing_exit and existing_exit.is_alive():
+            print(f"⚠️ New entry for {symbol} → executing pending exit immediately.")
             execute_market_exit(symbol, side="BUY" if side=="SELL" else "SELL")
-            PENDING_EXITS[symbol] = False
+            EXIT_THREADS[symbol] = None
 
     # Close existing position if any
     pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
@@ -168,7 +176,6 @@ def open_position(symbol, side, limit_price):
     set_leverage_and_margin(symbol)
     qty = calculate_quantity(symbol)
 
-    # Place LIMIT order
     retries = 3
     response = None
     while retries > 0:
@@ -212,7 +219,6 @@ def webhook():
             r = {"error": "Unknown comment"}
 
         return jsonify({"status": "ok", "response": r})
-
     except Exception as e:
         print("❌ Webhook Error:", e)
         return jsonify({"error": str(e)})
