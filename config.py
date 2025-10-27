@@ -32,4 +32,7 @@ MARGIN_TYPE  = os.getenv("MARGIN_TYPE", "CROSS")        # CROSS or ISOLATED
 # ==============================
 # 🔹 EXIT ORDER PARAMETERS
 # ==============================
-EXIT_MARKET_DELAY = int(os.getenv("EXIT_MARKET_DELAY", "60"))  # delay before market exit (in seconds)
+EXIT_MARKET_DELAY = int(os.getenv("EXIT_MARKET_DELAY", "5"))  # delay before market exit (in seconds)
+
+# Maximum concurrent active trades
+MAX_ACTIVE_TRADES = int(os.getenv("MAX_ACTIVE_TRADES", 5))
