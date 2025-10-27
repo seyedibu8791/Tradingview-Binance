@@ -107,40 +107,10 @@ def execute_market_exit(symbol, side):
     print(f"✖️ {close_side} MARKET EXIT executed for {symbol}, Qty: {qty}")
     return response
 
-def close_existing_if_opposite(symbol, new_side):
-    """If an opposite position exists, close it first before opening new."""
-    try:
-        pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
-        if not pos_data:
-            return False
-        amt = float(pos_data[0]["positionAmt"])
-        if amt > 0 and new_side == "SELL":
-            print(f"🔁 Opposite signal detected — closing LONG before new SHORT for {symbol}")
-            execute_market_exit(symbol, "BUY")
-            print(f"⏳ Waiting {OPPOSITE_CLOSE_DELAY}s before opening new SHORT...")
-            time.sleep(OPPOSITE_CLOSE_DELAY)
-            return True
-        elif amt < 0 and new_side == "BUY":
-            print(f"🔁 Opposite signal detected — closing SHORT before new LONG for {symbol}")
-            execute_market_exit(symbol, "SELL")
-            print(f"⏳ Waiting {OPPOSITE_CLOSE_DELAY}s before opening new LONG...")
-            time.sleep(OPPOSITE_CLOSE_DELAY)
-            return True
-        return False
-    except Exception as e:
-        print("❌ Failed to close opposite position:", e)
-        return False
-
-def open_position(symbol, side, limit_price):
-    active_count = count_active_trades()
-    if active_count >= MAX_ACTIVE_TRADES:
-        print(f"🚫 Trade limit reached ({active_count}/{MAX_ACTIVE_TRADES}). Skipping {symbol} {side}.")
-        return {"status": "max_trades_reached", "active_trades": active_count}
-
-    close_existing_if_opposite(symbol, side)
+# ===== Async Exit + Open Logic =====
+def open_position_now(symbol, side, limit_price):
     set_leverage_and_margin(symbol)
     qty = calculate_quantity(symbol)
-
     response = binance_signed_request("POST", "/fapi/v1/order", {
         "symbol": symbol,
         "side": side,
@@ -155,6 +125,32 @@ def open_position(symbol, side, limit_price):
     else:
         print(f"❌ Entry failed for {symbol}: {response}")
     return response
+
+def async_exit_and_open(symbol, new_side, limit_price):
+    """Close opposite position (if any), wait, then open new position in a separate thread."""
+    def worker():
+        try:
+            pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
+            amt = float(pos_data[0]["positionAmt"]) if pos_data else 0
+            opposite_side = None
+
+            if amt > 0 and new_side == "SELL":
+                opposite_side = "BUY"
+            elif amt < 0 and new_side == "BUY":
+                opposite_side = "SELL"
+
+            if opposite_side:
+                print(f"🔁 Closing opposite {opposite_side} for {symbol}")
+                execute_market_exit(symbol, opposite_side)
+                print(f"⏳ Waiting {OPPOSITE_CLOSE_DELAY}s before opening new {new_side}...")
+                time.sleep(OPPOSITE_CLOSE_DELAY)
+
+            open_position_now(symbol, new_side, limit_price)
+
+        except Exception as e:
+            print("❌ Async exit & open error:", e)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 # ===== Webhook =====
 @app.route('/webhook', methods=['POST'])
@@ -175,23 +171,21 @@ def webhook():
 
         # 🔹 Handle signal types
         if comment in ["BUY_ENTRY", "CROSS_EXIT_SHORT"]:
-            close_existing_if_opposite(symbol, "BUY")
-            r = open_position(symbol, "BUY", close_price)
+            async_exit_and_open(symbol, "BUY", close_price)
 
         elif comment in ["SELL_ENTRY", "CROSS_EXIT_LONG"]:
-            close_existing_if_opposite(symbol, "SELL")
-            r = open_position(symbol, "SELL", close_price)
+            async_exit_and_open(symbol, "SELL", close_price)
 
         elif comment == "EXIT_LONG":
-            r = execute_market_exit(symbol, "BUY")
+            execute_market_exit(symbol, "BUY")
 
         elif comment == "EXIT_SHORT":
-            r = execute_market_exit(symbol, "SELL")
+            execute_market_exit(symbol, "SELL")
 
         else:
-            r = {"error": f"Unknown comment: {comment}"}
+            return jsonify({"error": f"Unknown comment: {comment}"})
 
-        return jsonify({"status": "ok", "response": r})
+        return jsonify({"status": "ok"})
 
     except Exception as e:
         print("❌ Webhook Error:", e)
