@@ -41,8 +41,8 @@ EXIT_LIMIT_TIMEOUT      = int(os.getenv("EXIT_LIMIT_TIMEOUT", "5"))   # Timeout 
 # ==============================
 # 🔹 TELEGRAM & SUMMARY CONFIG
 # ==============================
-TELEGRAM_BOT_TOKEN     = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID       = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = "8282710007:AAFbcLUwHRrMrBJ5VacJQQFM27qxdCplwO4"
+TELEGRAM_CHAT_ID   = "-1003281678423"
 
 # Daily summary time in IST (HH:MM format)
 DAILY_SUMMARY_TIME_IST = os.getenv("DAILY_SUMMARY_TIME_IST", "00:00")
