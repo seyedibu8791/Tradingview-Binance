@@ -1,13 +1,14 @@
 from flask import Flask, request, jsonify
 import requests, hmac, hashlib, time, threading, os
 from config import *
+from trade_notifier import log_trade_entry, log_trade_exit
 
 app = Flask(__name__)
 
 # ===== Env / Exit Limit Settings =====
 USE_BAR_EXIT = os.getenv("USE_BAR_HIGH_LOW_EXIT", "True").lower() in ("1", "true", "yes")
 EXIT_WAIT_LIMIT_SECS = int(os.getenv("EXIT_WAIT_LIMIT_SECS", "5"))
-OPPOSITE_CLOSE_DELAY = int(os.getenv("OPPOSITE_CLOSE_DELAY", "3"))  # ⏳ Delay (in seconds) before opening new position
+OPPOSITE_CLOSE_DELAY = int(os.getenv("OPPOSITE_CLOSE_DELAY", "3"))  # Delay before opening new position
 
 # ===== Binance Helpers =====
 def binance_signed_request(http_method, path, params=None):
@@ -88,6 +89,32 @@ def calculate_quantity(symbol):
         print("❌ Failed to calculate quantity:", e)
         return 0.001
 
+def open_position_now(symbol, side, limit_price):
+    set_leverage_and_margin(symbol)
+    qty = calculate_quantity(symbol)
+    response = binance_signed_request("POST", "/fapi/v1/order", {
+        "symbol": symbol,
+        "side": side,
+        "type": "LIMIT",
+        "timeInForce": "GTC",
+        "quantity": qty,
+        "price": limit_price
+    })
+    if "orderId" in response:
+        OPEN_LIMIT_ORDERS[symbol] = response["orderId"]
+        print(f"📊 {side} LIMIT ENTRY: {symbol}, Qty: {qty}, Price: {limit_price}")
+
+        # Fetch filled price
+        filled_resp = binance_signed_request("GET", "/fapi/v1/order", {
+            "symbol": symbol,
+            "orderId": response["orderId"]
+        })
+        filled_price = float(filled_resp.get("avgFillPrice", limit_price))
+        log_trade_entry(symbol, side, response["orderId"], filled_price)
+    else:
+        print(f"❌ Entry failed for {symbol}: {response}")
+    return response
+
 def execute_market_exit(symbol, side):
     pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
     if not pos_data or abs(float(pos_data[0]["positionAmt"])) == 0:
@@ -105,27 +132,13 @@ def execute_market_exit(symbol, side):
         "quantity": qty
     })
     print(f"✖️ {close_side} MARKET EXIT executed for {symbol}, Qty: {qty}")
+
+    # Use actual filled price from response
+    filled_price = float(response.get("avgFillPrice", 0)) or float(pos_data[0]["entryPrice"])
+    log_trade_exit(symbol, response.get("orderId", 0), filled_price)
     return response
 
 # ===== Async Exit + Open Logic =====
-def open_position_now(symbol, side, limit_price):
-    set_leverage_and_margin(symbol)
-    qty = calculate_quantity(symbol)
-    response = binance_signed_request("POST", "/fapi/v1/order", {
-        "symbol": symbol,
-        "side": side,
-        "type": "LIMIT",
-        "timeInForce": "GTC",
-        "quantity": qty,
-        "price": limit_price
-    })
-    if "orderId" in response:
-        OPEN_LIMIT_ORDERS[symbol] = response["orderId"]
-        print(f"📊 {side} LIMIT ENTRY: {symbol}, Qty: {qty}, Price: {limit_price}")
-    else:
-        print(f"❌ Entry failed for {symbol}: {response}")
-    return response
-
 def async_exit_and_open(symbol, new_side, limit_price):
     """Close opposite position (if any), wait, then open new position in a separate thread."""
     def worker():
@@ -169,7 +182,7 @@ def webhook():
         bar_high = float(bar_high) if bar_high else None
         bar_low = float(bar_low) if bar_low else None
 
-        # 🔹 Handle signal types
+        # Handle signal types
         if comment in ["BUY_ENTRY", "CROSS_EXIT_SHORT"]:
             async_exit_and_open(symbol, "BUY", close_price)
 
