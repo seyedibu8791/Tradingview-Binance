@@ -18,7 +18,7 @@ TELEGRAM_CHAT_ID = "-1003281678423"
 # TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 # TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-TRADE_AMOUNT = 100  # Adjust as per your trade size
+TRADE_AMOUNT = 50  # Adjust as per your trade size
 LEVERAGE = 20       # Leverage used in strategy
 
 # =======================
