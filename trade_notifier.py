@@ -10,8 +10,8 @@ import datetime
 # =======================
 # You can hardcode directly here OR use environment variables.
 # Example (hardcoded):
-TELEGRAM_BOT_TOKEN = "1234567890:ABCDEF-your-bot-token"
-TELEGRAM_CHAT_ID = "-1001234567890"
+TELEGRAM_BOT_TOKEN = "8282710007:AAFbcLUwHRrMrBJ5VacJQQFM27qxdCplwO4"
+TELEGRAM_CHAT_ID = "-1003281678423"
 
 # If you prefer env vars, comment the above 2 lines and use below:
 # import os
