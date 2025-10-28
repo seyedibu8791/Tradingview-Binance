@@ -1,23 +1,57 @@
 # trade_notifier.py
 
-import requests, threading, time, datetime
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TRADE_AMOUNT, LEVERAGE
+import requests
+import threading
+import time
+import datetime
 
-trades = {}  # Store ongoing and closed trades
+# =======================
+# 🔧 CONFIG (HARD-CODED or ENV)
+# =======================
+# You can hardcode directly here OR use environment variables.
+# Example (hardcoded):
+TELEGRAM_BOT_TOKEN = "1234567890:ABCDEF-your-bot-token"
+TELEGRAM_CHAT_ID = "-1001234567890"
 
-# ===== Telegram Helper =====
-def send_telegram_message(message):
+# If you prefer env vars, comment the above 2 lines and use below:
+# import os
+# TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+# TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+TRADE_AMOUNT = 100  # Adjust as per your trade size
+LEVERAGE = 20       # Leverage used in strategy
+
+# =======================
+# 🧾 TRADE STORAGE
+# =======================
+trades = {}  # Stores all trades {symbol: {...}}
+
+
+# =======================
+# 📢 TELEGRAM HELPER
+# =======================
+def send_telegram_message(message: str):
+    """Send a formatted message to Telegram"""
     try:
+        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+            print("⚠️ Missing Telegram credentials. Skipping message.")
+            return
+
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
-        response = requests.post(url, data=payload)
-        if response.status_code != 200:
-            print("❌ Telegram failed:", response.status_code, response.text)
-    except Exception as e:
-        print("❌ Telegram send exception:", e)
+        response = requests.post(url, data=payload, timeout=10)
 
-# ===== Trade Logging =====
-def log_trade_entry(symbol, side, order_id, filled_price):
+        if response.status_code != 200:
+            print("❌ Telegram Error:", response.status_code, response.text)
+    except Exception as e:
+        print("❌ Telegram Exception:", e)
+
+
+# =======================
+# 🟩 TRADE ENTRY LOGGING
+# =======================
+def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float):
+    """Record and notify a trade entry"""
     trades[symbol] = {
         "side": side,
         "entry_price": filled_price,
@@ -27,17 +61,30 @@ def log_trade_entry(symbol, side, order_id, filled_price):
         "pnl": 0,
         "pnl_percent": 0
     }
+
     message = f"""💹 <b>Trade Entry</b>
-Symbol: #{symbol}
-Side: {side}
-Leverage: {LEVERAGE}X
-Entry Price: {filled_price}
-⏳ Wait for Close Signal!"""
+Symbol: <b>#{symbol}</b>
+Side: <b>{side}</b>
+Leverage: {LEVERAGE}x
+Entry Price: <b>{filled_price}</b>
+⏳ Waiting for Exit Signal..."""
     send_telegram_message(message)
 
-def log_trade_exit(symbol, order_id, filled_price):
+
+# =======================
+# 🟥 TRADE EXIT LOGGING
+# =======================
+def log_trade_exit(symbol: str, order_id: str, filled_price: float):
+    """Record and notify a trade exit"""
     if symbol not in trades:
-        trades[symbol] = {"side": "UNKNOWN", "entry_price": filled_price, "closed": True, "exit_price": filled_price, "pnl": 0, "pnl_percent": 0}
+        trades[symbol] = {
+            "side": "UNKNOWN",
+            "entry_price": filled_price,
+            "closed": True,
+            "exit_price": filled_price,
+            "pnl": 0,
+            "pnl_percent": 0
+        }
 
     trade = trades[symbol]
     trade["exit_price"] = filled_price
@@ -45,58 +92,67 @@ def log_trade_exit(symbol, order_id, filled_price):
 
     # Calculate PnL with leverage
     qty = TRADE_AMOUNT
+    entry_price = trade["entry_price"]
+
     if trade["side"] == "BUY":
-        pnl = (filled_price - trade["entry_price"]) * qty * LEVERAGE / trade["entry_price"]
-        pnl_percent = ((filled_price - trade["entry_price"]) / trade["entry_price"]) * 100 * LEVERAGE
+        pnl = (filled_price - entry_price) * qty * LEVERAGE / entry_price
+        pnl_percent = ((filled_price - entry_price) / entry_price) * 100 * LEVERAGE
     elif trade["side"] == "SELL":
-        pnl = (trade["entry_price"] - filled_price) * qty * LEVERAGE / trade["entry_price"]
-        pnl_percent = ((trade["entry_price"] - filled_price) / trade["entry_price"]) * 100 * LEVERAGE
+        pnl = (entry_price - filled_price) * qty * LEVERAGE / entry_price
+        pnl_percent = ((entry_price - filled_price) / entry_price) * 100 * LEVERAGE
     else:
-        pnl = 0
-        pnl_percent = 0
+        pnl = pnl_percent = 0
 
     trade["pnl"] = round(pnl, 2)
     trade["pnl_percent"] = round(pnl_percent, 2)
 
     status_icon = "✅" if pnl > 0 else "⛔️"
+
     message = f"""💹 <b>Trade Closed</b> {status_icon}
-Symbol: #{symbol}
-Side: {trade['side']}
+Symbol: <b>#{symbol}</b>
+Side: <b>{trade['side']}</b>
 Entry: {trade['entry_price']}
 Exit: {trade['exit_price']}
 PnL $: {trade['pnl']}
 PnL %: {trade['pnl_percent']}%"""
     send_telegram_message(message)
 
-# ===== End of Day Summary =====
+
+# =======================
+# 📅 DAILY SUMMARY THREAD
+# =======================
 def send_daily_summary():
+    """Send end-of-day summary to Telegram automatically"""
     while True:
         now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5.5)))  # IST
         next_run = now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
         sleep_seconds = (next_run - now).total_seconds()
         time.sleep(sleep_seconds)
 
+        closed_trades = [t for t in trades.values() if t["closed"]]
         total_signals = len(trades)
-        profitable = sum(1 for t in trades.values() if t["closed"] and t["pnl"] > 0)
-        lost = sum(1 for t in trades.values() if t["closed"] and t["pnl"] < 0)
-        cancelled = sum(1 for t in trades.values() if not t["closed"])
-        net_pnl_percent = round(sum(t["pnl_percent"] for t in trades.values() if t["closed"]), 2)
+        profitable = sum(1 for t in closed_trades if t["pnl"] > 0)
+        lost = sum(1 for t in closed_trades if t["pnl"] < 0)
+        open_trades = sum(1 for t in trades.values() if not t["closed"])
+        net_pnl_percent = round(sum(t["pnl_percent"] for t in closed_trades), 2)
 
         detailed_msg = ""
-        for t_sym, t in trades.items():
+        for symbol, t in trades.items():
             if t["closed"]:
                 status_icon = "✅" if t["pnl"] > 0 else "⛔️"
-                detailed_msg += f"#{t_sym} {t['side']} Closed {status_icon} | Entry: {t['entry_price']} | Exit: {t['exit_price']} | PnL%: {t['pnl_percent']} | PnL$: {t['pnl']}\n"
+                detailed_msg += f"#{symbol} {t['side']} {status_icon} | Entry: {t['entry_price']} | Exit: {t['exit_price']} | PnL%: {t['pnl_percent']} | PnL$: {t['pnl']}\n"
 
         summary_msg = f"""{detailed_msg}
-👇🏻 Signals Summary
-➕ Total Signals Sent: {total_signals}
+👇🏻 <b>Signals Summary</b>
+➕ Total Signals: {total_signals}
 ✔️ Profitable: {profitable}
 ✖️ Lost: {lost}
-◼️ Cancelled/Not Executed: {cancelled}
+◼️ Open Trades: {open_trades}
 ✅ Net PnL %: {net_pnl_percent}%"""
+
         send_telegram_message(summary_msg)
         trades.clear()
 
-# Start daily summary thread
+
+# Start daily summary thread automatically
 threading.Thread(target=send_daily_summary, daemon=True).start()
