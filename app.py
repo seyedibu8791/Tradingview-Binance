@@ -46,8 +46,8 @@ def round_quantity(symbol, qty):
     info = get_symbol_info(symbol)
     if not info:
         return round(qty, 3)
-    step_size = float([f["stepSize"] for f in info["filters"] if f["filterType"]=="LOT_SIZE"][0])
-    min_qty = float([f["minQty"] for f in info["filters"] if f["filterType"]=="LOT_SIZE"][0])
+    step_size = float([f["stepSize"] for f in info["filters"] if f["filterType"] == "LOT_SIZE"][0])
+    min_qty = float([f["minQty"] for f in info["filters"] if f["filterType"] == "LOT_SIZE"][0])
     qty = (qty // step_size) * step_size
     if qty < min_qty:
         qty = min_qty
@@ -86,6 +86,9 @@ def open_position(symbol, side, limit_price):
     set_leverage_and_margin(symbol)
     qty = calculate_quantity(symbol)
 
+    # ✅ Send Telegram message immediately (even if filled instantly)
+    log_trade_entry(symbol, side, "PENDING", limit_price)
+
     response = binance_signed_request("POST", "/fapi/v1/order", {
         "symbol": symbol,
         "side": side,
@@ -95,7 +98,6 @@ def open_position(symbol, side, limit_price):
         "price": limit_price
     })
 
-    # ✅ Notify only when order is filled
     if "orderId" in response:
         order_id = response["orderId"]
         threading.Thread(target=wait_and_notify_filled_entry, args=(symbol, side, order_id), daemon=True).start()
@@ -103,12 +105,12 @@ def open_position(symbol, side, limit_price):
     return response
 
 def wait_and_notify_filled_entry(symbol, side, order_id):
-    """Wait until Binance fills the order, then notify Telegram."""
+    """Wait until Binance fills the entry order, then update Telegram."""
     while True:
         order_status = binance_signed_request("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
         if order_status.get("status") == "FILLED":
             filled_price = float(order_status.get("avgPrice") or order_status.get("price") or 0)
-            log_trade_entry(symbol, side, order_id, filled_price)  # ✅ log entry
+            log_trade_entry(symbol, side, order_id, filled_price)  # ✅ Confirm filled entry
             break
         time.sleep(1)
 
@@ -130,21 +132,42 @@ def execute_market_exit(symbol, side):
         "quantity": qty
     })
 
-    # ✅ Notify on exit fill
     if "orderId" in response:
         threading.Thread(target=wait_and_notify_filled_exit, args=(symbol, response["orderId"]), daemon=True).start()
 
     return response
 
 def wait_and_notify_filled_exit(symbol, order_id):
-    """Wait until exit order fills and send Telegram notification."""
+    """Wait until exit order fills, clean residuals, and send Telegram notification."""
     while True:
         order_status = binance_signed_request("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
         if order_status.get("status") == "FILLED":
             filled_price = float(order_status.get("avgPrice") or order_status.get("price") or 0)
             log_trade_exit(symbol, order_id, filled_price)  # ✅ log exit
+            clean_residual_positions(symbol)
             break
         time.sleep(1)
+
+# ===== Auto-clean residual positions =====
+def clean_residual_positions(symbol):
+    """Closes leftover open orders or 0-amount positions."""
+    try:
+        # Cancel any open orders
+        binance_signed_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
+        # Check positions and close if any residual
+        pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
+        if pos_data and abs(float(pos_data[0]["positionAmt"])) > 0.00001:
+            amt = abs(float(pos_data[0]["positionAmt"]))
+            side = "SELL" if float(pos_data[0]["positionAmt"]) > 0 else "BUY"
+            binance_signed_request("POST", "/fapi/v1/order", {
+                "symbol": symbol,
+                "side": side,
+                "type": "MARKET",
+                "quantity": round_quantity(symbol, amt)
+            })
+            print(f"🧹 Residual position cleaned for {symbol}")
+    except Exception as e:
+        print("⚠️ Residual cleanup failed:", e)
 
 # ===== Async Close & Open Logic =====
 def async_exit_and_open(symbol, new_side, limit_price):
