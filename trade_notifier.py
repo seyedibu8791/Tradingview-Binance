@@ -62,12 +62,14 @@ def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float):
         "pnl_percent": 0
     }
 
-    message = f"""💹 <b>Trade Entry</b>
+    message = f"""📈 <b>Trade Entry</b>
 Symbol: <b>#{symbol}</b>
 Side: <b>{side}</b>
 Leverage: {LEVERAGE}x
+--- ⌁ ---
 Entry Price: <b>{filled_price}</b>
-⏳ Waiting for Exit Signal..."""
+--- ⌁ ---
+🕐 Waiting for Exit Signal..."""
     send_telegram_message(message)
 
 
@@ -106,13 +108,15 @@ def log_trade_exit(symbol: str, order_id: str, filled_price: float):
     trade["pnl"] = round(pnl, 2)
     trade["pnl_percent"] = round(pnl_percent, 2)
 
-    status_icon = "✅" if pnl > 0 else "⛔️"
+    status_icon = "🤑" if pnl > 0 else "⛔️"
 
-    message = f"""💹 <b>Trade Closed</b> {status_icon}
+    message = f"""📉 <b>Trade Closed</b> {status_icon}
 Symbol: <b>#{symbol}</b>
 Side: <b>{trade['side']}</b>
+--- ⌁ ---
 Entry: {trade['entry_price']}
 Exit: {trade['exit_price']}
+--- ⌁ ---
 PnL $: {trade['pnl']}
 PnL %: {trade['pnl_percent']}%"""
     send_telegram_message(message)
