@@ -3,7 +3,7 @@
 from flask import Flask, request, jsonify
 import requests, hmac, hashlib, time, threading, os
 from config import *
-from trade_notifier import log_trade_entry, log_trade_exit  # ✅ integrated notifier
+from trade_notifier import log_trade_entry, log_trade_exit, trades  # ✅ include trades dict
 
 app = Flask(__name__)
 
@@ -28,6 +28,7 @@ def binance_signed_request(http_method, path, params=None):
         print("❌ Binance request failed:", e)
         return {"error": str(e)}
 
+
 def set_leverage_and_margin(symbol):
     try:
         binance_signed_request("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": LEVERAGE})
@@ -35,12 +36,14 @@ def set_leverage_and_margin(symbol):
     except Exception as e:
         print("❌ Failed to set leverage/margin:", e)
 
+
 def get_symbol_info(symbol):
     info = requests.get(f"{BASE_URL}/fapi/v1/exchangeInfo").json()
     for s in info.get("symbols", []):
         if s["symbol"] == symbol:
             return s
     return None
+
 
 def round_quantity(symbol, qty):
     info = get_symbol_info(symbol)
@@ -53,6 +56,7 @@ def round_quantity(symbol, qty):
         qty = min_qty
     return round(qty, 8)
 
+
 # ===== Active Trades =====
 def count_active_trades():
     try:
@@ -62,6 +66,7 @@ def count_active_trades():
     except Exception as e:
         print("❌ Failed to fetch active trades:", e)
         return 0
+
 
 # ===== Calculate Quantity =====
 def calculate_quantity(symbol):
@@ -76,6 +81,7 @@ def calculate_quantity(symbol):
         print("❌ Failed to calculate quantity:", e)
         return 0.001
 
+
 # ===== Open Position =====
 def open_position(symbol, side, limit_price):
     active_count = count_active_trades()
@@ -86,8 +92,9 @@ def open_position(symbol, side, limit_price):
     set_leverage_and_margin(symbol)
     qty = calculate_quantity(symbol)
 
-    # ✅ Send Telegram message immediately (even if filled instantly)
-    log_trade_entry(symbol, side, "PENDING", limit_price)
+    # ✅ Avoid duplicate entry messages
+    if symbol not in trades or trades[symbol].get("closed", True):
+        log_trade_entry(symbol, side, "PENDING", limit_price)
 
     response = binance_signed_request("POST", "/fapi/v1/order", {
         "symbol": symbol,
@@ -104,15 +111,19 @@ def open_position(symbol, side, limit_price):
 
     return response
 
+
 def wait_and_notify_filled_entry(symbol, side, order_id):
-    """Wait until Binance fills the entry order, then update Telegram."""
+    """Wait until Binance fills the entry order, then update Telegram once."""
     while True:
         order_status = binance_signed_request("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
         if order_status.get("status") == "FILLED":
             filled_price = float(order_status.get("avgPrice") or order_status.get("price") or 0)
-            log_trade_entry(symbol, side, order_id, filled_price)  # ✅ Confirm filled entry
+            # ✅ Only update if not already filled
+            if trades.get(symbol, {}).get("order_id") != order_id:
+                log_trade_entry(symbol, side, order_id, filled_price)
             break
         time.sleep(1)
+
 
 # ===== Market Exit =====
 def execute_market_exit(symbol, side):
@@ -137,24 +148,24 @@ def execute_market_exit(symbol, side):
 
     return response
 
+
 def wait_and_notify_filled_exit(symbol, order_id):
     """Wait until exit order fills, clean residuals, and send Telegram notification."""
     while True:
         order_status = binance_signed_request("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
         if order_status.get("status") == "FILLED":
             filled_price = float(order_status.get("avgPrice") or order_status.get("price") or 0)
-            log_trade_exit(symbol, order_id, filled_price)  # ✅ log exit
+            log_trade_exit(symbol, order_id, filled_price)
             clean_residual_positions(symbol)
             break
         time.sleep(1)
+
 
 # ===== Auto-clean residual positions =====
 def clean_residual_positions(symbol):
     """Closes leftover open orders or 0-amount positions."""
     try:
-        # Cancel any open orders
         binance_signed_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
-        # Check positions and close if any residual
         pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
         if pos_data and abs(float(pos_data[0]["positionAmt"])) > 0.00001:
             amt = abs(float(pos_data[0]["positionAmt"]))
@@ -168,6 +179,7 @@ def clean_residual_positions(symbol):
             print(f"🧹 Residual position cleaned for {symbol}")
     except Exception as e:
         print("⚠️ Residual cleanup failed:", e)
+
 
 # ===== Async Close & Open Logic =====
 def async_exit_and_open(symbol, new_side, limit_price):
@@ -188,6 +200,7 @@ def async_exit_and_open(symbol, new_side, limit_price):
         open_position(symbol, new_side, limit_price)
 
     threading.Thread(target=worker, daemon=True).start()
+
 
 # ===== Webhook =====
 @app.route("/webhook", methods=["POST"])
@@ -221,10 +234,12 @@ def webhook():
         print("❌ Webhook Error:", e)
         return jsonify({"error": str(e)})
 
+
 # ===== Ping =====
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
+
 
 # ===== Self Ping =====
 def self_ping():
@@ -235,7 +250,9 @@ def self_ping():
             pass
         time.sleep(5 * 60)
 
+
 threading.Thread(target=self_ping, daemon=True).start()
+
 
 # ===== Run Flask =====
 if __name__ == "__main__":
