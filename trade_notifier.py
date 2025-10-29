@@ -8,23 +8,17 @@ import datetime
 # =======================
 # 🔧 CONFIG (HARD-CODED or ENV)
 # =======================
-# You can hardcode directly here OR use environment variables.
-# Example (hardcoded):
 TELEGRAM_BOT_TOKEN = "8282710007:AAFbcLUwHRrMrBJ5VacJQQFM27qxdCplwO4"
 TELEGRAM_CHAT_ID = "-1003281678423"
 
-# If you prefer env vars, comment the above 2 lines and use below:
-# import os
-# TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-# TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-
-TRADE_AMOUNT = 50  # Adjust as per your trade size
+TRADE_AMOUNT = 50   # Adjust as per your trade size
 LEVERAGE = 20       # Leverage used in strategy
 
 # =======================
 # 🧾 TRADE STORAGE
 # =======================
-trades = {}  # Stores all trades {symbol: {...}}
+trades = {}         # {symbol: {...}}
+notified_orders = {}  # Track sent states {order_id: status}
 
 
 # =======================
@@ -50,27 +44,35 @@ def send_telegram_message(message: str):
 # =======================
 # 🟩 TRADE ENTRY LOGGING
 # =======================
-def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float):
-    """Record and notify a trade entry"""
-    trades[symbol] = {
-        "side": side,
-        "entry_price": filled_price,
-        "order_id": order_id,
-        "closed": False,
-        "exit_price": None,
-        "pnl": 0,
-        "pnl_percent": 0
-    }
-
-    message = f"""📈 <b>Trade Entry</b>
+def log_trade_entry(symbol: str, side: str, order_id: str, status: str, filled_price: float = None):
+    """Record and notify trade entry creation and fill"""
+    # If new signal (not filled yet)
+    if status == "NEW" and notified_orders.get(order_id) != "NEW":
+        msg = f"""🚀 <b>Entry Signal Received</b>
 Symbol: <b>#{symbol}</b>
 Side: <b>{side}</b>
 Leverage: {LEVERAGE}x
---- ⌁ ---
-Entry Price: <b>{filled_price}</b>
---- ⌁ ---
-🕐 Waiting for Exit Signal..."""
-    send_telegram_message(message)
+Status: Awaiting Fill ⏳"""
+        send_telegram_message(msg)
+        notified_orders[order_id] = "NEW"
+
+    # When filled
+    elif status == "FILLED" and notified_orders.get(order_id) != "FILLED":
+        msg = f"""#<b>{symbol}</b> All entry targets achieved ✅
+Average Entry Price: <b>{filled_price}</b> 💵"""
+        send_telegram_message(msg)
+        notified_orders[order_id] = "FILLED"
+
+        # Store in trade list
+        trades[symbol] = {
+            "side": side,
+            "entry_price": filled_price,
+            "order_id": order_id,
+            "closed": False,
+            "exit_price": None,
+            "pnl": 0,
+            "pnl_percent": 0
+        }
 
 
 # =======================
