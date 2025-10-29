@@ -1,8 +1,8 @@
-# app.py (UPDATED: HT/LT trend gating logic added)
+# app.py (UPDATED: HT alerts only set trend & message; no trade execution on HT)
 from flask import Flask, request, jsonify
 import requests, hmac, hashlib, time, threading, os, re
 from config import *
-from trade_notifier import log_trade_entry, log_trade_exit, trades, send_telegram_message  # added send_telegram_message
+from trade_notifier import log_trade_entry, log_trade_exit, trades, send_telegram_message
 
 app = Flask(__name__)
 
@@ -290,8 +290,8 @@ def set_ht_direction(symbol: str, direction: str):
                 "ht_direction": direction,
                 "last_ht_change": now
             }
-            # notify initial HT direction
-            send_telegram_message(f"🔔 HT trend set for #{symbol}: {direction}")
+            # notify initial HT direction using exact requested format
+            send_telegram_message(f"🔔 Higher timeframe trend set for #{symbol}: {direction}")
             return
 
         prev = st.get("ht_direction")
@@ -299,7 +299,10 @@ def set_ht_direction(symbol: str, direction: str):
             st["ht_direction"] = direction
             st["last_ht_change"] = now
             # send Telegram message about HT trend change
-            send_telegram_message(f"🔁 Higher timeframe trend changed for #{symbol}: {prev} -> {direction}" if prev else f"🔔 Higher timeframe trend set for #{symbol}: {direction}")
+            if prev:
+                send_telegram_message(f"🔁 Higher timeframe trend changed for #{symbol}: {prev} -> {direction}")
+            else:
+                send_telegram_message(f"🔔 Higher timeframe trend set for #{symbol}: {direction}")
 
 
 def get_ht_info(symbol: str):
@@ -352,7 +355,7 @@ def webhook():
                 is_lt_alert = True
 
         # Normalize comment to uppercase
-        comment_u = (comment or "").upper()
+        comment_u = (comment or "").upper().strip()
 
         # Helper boolean checks
         is_entry = comment_u in ("BUY_ENTRY", "SELL_ENTRY")
@@ -364,31 +367,17 @@ def webhook():
 
         # ----- HIGHER-TIMEFRAME ALERT -----
         if is_ht_alert:
-            # If HT is an entry, set HT direction
+            # HT entries only set the trend and send the message — DO NOT execute trades
             if comment_u == "BUY_ENTRY":
                 set_ht_direction(symbol, "BUY")
-                # HT entry itself should not auto-open immediate LT-position, but we respect that HT defines trend.
-                # Optionally we could open position on HT signal too. Here we will allow HT entry to open trade (same as LT entry)
-                # We'll proceed to open as per your existing logic (same as LT when allowed).
-                # Proceed with actual open (as BUY) - this keeps previous behavior consistent.
-                async_exit_and_open(symbol, "BUY", close_price)
-                return jsonify({"status": "ok", "message": "HT BUY processed"}), 200
+                # message already sent from set_ht_direction
+                return jsonify({"status": "ok", "message": "HT BUY trend set"}), 200
             elif comment_u == "SELL_ENTRY":
                 set_ht_direction(symbol, "SELL")
-                async_exit_and_open(symbol, "SELL", close_price)
-                return jsonify({"status": "ok", "message": "HT SELL processed"}), 200
+                return jsonify({"status": "ok", "message": "HT SELL trend set"}), 200
             else:
-                # If HT alert is exit type, allow exit (always allowed)
-                if is_exit:
-                    # map exit comments to sides for execute_market_exit
-                    if is_cross_exit_short or is_exit_long:
-                        execute_market_exit(symbol, "BUY")
-                    elif is_cross_exit_long or is_exit_short:
-                        execute_market_exit(symbol, "SELL")
-                    return jsonify({"status": "ok", "message": "HT exit processed"}), 200
-
-                # Unknown HT comment
-                return jsonify({"status": "ignored", "message": "Unknown HT comment"}), 200
+                # For HT exits or other alerts: ignore (do not execute)
+                return jsonify({"status": "ignored", "message": "HT ignored (only trend-setting allowed)"}), 200
 
         # ----- LOWER-TIMEFRAME ALERT -----
         if is_lt_alert:
