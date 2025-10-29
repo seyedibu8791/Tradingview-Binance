@@ -6,26 +6,25 @@ import time
 import datetime
 
 # =======================
-# 🔧 CONFIG (HARD-CODED or ENV)
+# 🔧 CONFIG
 # =======================
 TELEGRAM_BOT_TOKEN = "8282710007:AAFbcLUwHRrMrBJ5VacJQQFM27qxdCplwO4"
 TELEGRAM_CHAT_ID = "-1003281678423"
 
-TRADE_AMOUNT = 50   # Adjust as per your trade size
-LEVERAGE = 20       # Leverage used in strategy
+TRADE_AMOUNT = 50
+LEVERAGE = 20
 
 # =======================
-# 🧾 TRADE STORAGE
+# 🧾 STORAGE
 # =======================
-trades = {}         # {symbol: {...}}
-notified_orders = {}  # Track sent states {order_id: status}
+trades = {}
+notified_orders = {}  # {order_id: "NEW"/"FILLED"}
 
 
 # =======================
-# 📢 TELEGRAM HELPER
+# 📢 TELEGRAM
 # =======================
 def send_telegram_message(message: str):
-    """Send a formatted message to Telegram"""
     try:
         if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
             print("⚠️ Missing Telegram credentials. Skipping message.")
@@ -45,25 +44,29 @@ def send_telegram_message(message: str):
 # 🟩 TRADE ENTRY LOGGING
 # =======================
 def log_trade_entry(symbol: str, side: str, order_id: str, status: str, filled_price: float = None):
-    """Record and notify trade entry creation and fill"""
-    # If new signal (not filled yet)
+    """Send entry updates in two stages — on creation & on fill"""
+
+    # 1️⃣ Order created (first time)
     if status == "NEW" and notified_orders.get(order_id) != "NEW":
-        msg = f"""🚀 <b>Entry Signal Received</b>
+        message = f"""📈 <b>Trade Entry</b>
 Symbol: <b>#{symbol}</b>
 Side: <b>{side}</b>
 Leverage: {LEVERAGE}x
-Status: Awaiting Fill ⏳"""
-        send_telegram_message(msg)
+--- ⌁ ---
+Entry Price: <b>{filled_price or 'Pending Fill'}</b>
+--- ⌁ ---
+🕐 Waiting for Exit Signal..."""
+        send_telegram_message(message)
         notified_orders[order_id] = "NEW"
 
-    # When filled
+    # 2️⃣ When order gets filled
     elif status == "FILLED" and notified_orders.get(order_id) != "FILLED":
-        msg = f"""#<b>{symbol}</b> All entry targets achieved ✅
+        message = f"""#<b>{symbol}</b> All entry targets achieved ✅
 Average Entry Price: <b>{filled_price}</b> 💵"""
-        send_telegram_message(msg)
+        send_telegram_message(message)
         notified_orders[order_id] = "FILLED"
 
-        # Store in trade list
+        # Save trade info
         trades[symbol] = {
             "side": side,
             "entry_price": filled_price,
@@ -94,7 +97,7 @@ def log_trade_exit(symbol: str, order_id: str, filled_price: float):
     trade["exit_price"] = filled_price
     trade["closed"] = True
 
-    # Calculate PnL with leverage
+    # Calculate PnL
     qty = TRADE_AMOUNT
     entry_price = trade["entry_price"]
 
@@ -125,10 +128,9 @@ PnL %: {trade['pnl_percent']}%"""
 
 
 # =======================
-# 📅 DAILY SUMMARY THREAD
+# 📅 DAILY SUMMARY
 # =======================
 def send_daily_summary():
-    """Send end-of-day summary to Telegram automatically"""
     while True:
         now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5.5)))  # IST
         next_run = now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
@@ -145,8 +147,8 @@ def send_daily_summary():
         detailed_msg = ""
         for symbol, t in trades.items():
             if t["closed"]:
-                status_icon = "✅" if t["pnl"] > 0 else "⛔️"
-                detailed_msg += f"#{symbol} {t['side']} {status_icon} | Entry: {t['entry_price']} | Exit: {t['exit_price']} | PnL%: {t['pnl_percent']} | PnL$: {t['pnl']}\n"
+                icon = "✅" if t["pnl"] > 0 else "⛔️"
+                detailed_msg += f"#{symbol} {t['side']} {icon} | Entry: {t['entry_price']} | Exit: {t['exit_price']} | PnL%: {t['pnl_percent']} | PnL$: {t['pnl']}\n"
 
         summary_msg = f"""{detailed_msg}
 👇🏻 <b>Signals Summary</b>
@@ -160,5 +162,5 @@ def send_daily_summary():
         trades.clear()
 
 
-# Start daily summary thread automatically
+# Start daily summary thread
 threading.Thread(target=send_daily_summary, daemon=True).start()
