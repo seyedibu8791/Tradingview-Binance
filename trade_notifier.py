@@ -19,23 +19,29 @@ LEVERAGE = 20
 trades = {}           # {symbol: {...}}
 notified_orders = {}  # {order_id: "NEW"/"FILLED"}
 
+
 # =======================
 # 📢 TELEGRAM HELPER
 # =======================
 def send_telegram_message(message: str):
+    """Send formatted text to Telegram chat."""
     try:
         if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
             print("⚠️ Missing Telegram credentials. Skipping message.")
             return
 
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML"
+        }
         response = requests.post(url, data=payload, timeout=10)
 
         if response.status_code != 200:
             print("❌ Telegram Error:", response.status_code, response.text)
         else:
-            print(f"✅ Sent Telegram message: {message[:60]}...")
+            print(f"✅ Sent Telegram message: {message[:80]}...")
     except Exception as e:
         print("❌ Telegram Exception:", e)
 
@@ -44,13 +50,15 @@ def send_telegram_message(message: str):
 # 🟩 TRADE ENTRY LOGGING
 # =======================
 def log_trade_entry(symbol: str, side: str, order_id: str, status: str, filled_price: float = None):
-    """Send both NEW (created) and FILLED (confirmed) messages"""
+    """Send both NEW (created) and FILLED (confirmed) messages safely."""
 
     symbol = symbol.upper()
     side = side.upper()
 
-    # Avoid duplicate sending for same order_id/status
-    if notified_orders.get(order_id) == status:
+    # Avoid duplicates
+    prev_status = notified_orders.get(order_id)
+    if prev_status == status:
+        print(f"⚠️ Skipping duplicate {status} message for {symbol}")
         return
 
     # --- 1️⃣ NEW Order Created ---
@@ -58,16 +66,17 @@ def log_trade_entry(symbol: str, side: str, order_id: str, status: str, filled_p
         arrow = "⬆️" if side == "BUY" else "⬇️"
         label = "Long Trade" if side == "BUY" else "Short Trade"
 
-        message = f"""{arrow} <b>{label}</b>
+        message = f"""
+{arrow} <b>{label}</b>
 Symbol: <b>#{symbol}</b>
 Side: <b>{side}</b>
---- ⌁ ---
 Leverage: {LEVERAGE}x
 Trade Amount: ${TRADE_AMOUNT}
 --- ⌁ ---
 Entry Price: <b>{filled_price or 'Pending Fill'}</b>
 --- ⌁ ---
-🕐 Wait for Exit Signal.."""
+🕐 Order Created — Waiting for Fill Confirmation...
+"""
         send_telegram_message(message)
         notified_orders[order_id] = "NEW"
 
@@ -78,7 +87,7 @@ Average Entry Price: <b>{filled_price}</b> 💵"""
         send_telegram_message(message)
         notified_orders[order_id] = "FILLED"
 
-        # Store trade details
+        # Track trade
         trades[symbol] = {
             "side": side,
             "entry_price": filled_price,
@@ -89,12 +98,15 @@ Average Entry Price: <b>{filled_price}</b> 💵"""
             "pnl_percent": 0
         }
 
+    else:
+        print(f"⚠️ Unknown order status {status} for {symbol}")
+
 
 # =======================
 # 🟥 TRADE EXIT LOGGING
 # =======================
 def log_trade_exit(symbol: str, order_id: str, filled_price: float):
-    """Record and notify trade exit"""
+    """Record and notify trade exit."""
     symbol = symbol.upper()
 
     if symbol not in trades:
@@ -108,17 +120,22 @@ def log_trade_exit(symbol: str, order_id: str, filled_price: float):
         }
 
     trade = trades[symbol]
+    if trade["closed"]:
+        print(f"⚠️ Skipping duplicate exit for {symbol}")
+        return
+
     trade["exit_price"] = filled_price
     trade["closed"] = True
 
     qty = TRADE_AMOUNT
     entry_price = trade["entry_price"]
+    side = trade["side"]
 
     # PnL Calculation
-    if trade["side"] == "BUY":
+    if side == "BUY":
         pnl = (filled_price - entry_price) * qty * LEVERAGE / entry_price
         pnl_percent = ((filled_price - entry_price) / entry_price) * 100 * LEVERAGE
-    elif trade["side"] == "SELL":
+    elif side == "SELL":
         pnl = (entry_price - filled_price) * qty * LEVERAGE / entry_price
         pnl_percent = ((entry_price - filled_price) / entry_price) * 100 * LEVERAGE
     else:
@@ -127,23 +144,16 @@ def log_trade_exit(symbol: str, order_id: str, filled_price: float):
     trade["pnl"] = round(pnl, 2)
     trade["pnl_percent"] = round(pnl_percent, 2)
 
-    if pnl > 0:
-        message = f"""Profit Achieved! ✅
-PnL: <b>{trade['pnl']}$</b> | {trade['pnl_percent']}%
---- ⌁ ---
-Symbol: <b>#{symbol}</b>
---- ⌁ ---
-Entry: {trade['entry_price']}
-Exit: {trade['exit_price']}"""
-    else:
-        message = f"""Ended in Loss! ⛔️
-PnL: <b>{trade['pnl']}$</b> | {trade['pnl_percent']}%
---- ⌁ ---
-Symbol: <b>#{symbol}</b>
---- ⌁ ---
-Entry: {trade['entry_price']}
-Exit: {trade['exit_price']}"""
+    icon = "✅" if pnl > 0 else "⛔️"
+    tag = "Profit Achieved!" if pnl > 0 else "Ended in Loss!"
 
+    message = f"""{tag} {icon}
+PnL: <b>{trade['pnl']}$</b> | {trade['pnl_percent']}%
+--- ⌁ ---
+Symbol: <b>#{symbol}</b>
+--- ⌁ ---
+Entry: {trade['entry_price']}
+Exit: {trade['exit_price']}"""
     send_telegram_message(message)
 
 
@@ -151,11 +161,12 @@ Exit: {trade['exit_price']}"""
 # 📅 DAILY SUMMARY THREAD
 # =======================
 def send_daily_summary():
-    """Send daily performance summary automatically (midnight IST)"""
+    """Send daily performance summary automatically at midnight (IST)."""
     while True:
         now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5.5)))
         next_run = now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
         sleep_seconds = (next_run - now).total_seconds()
+        print(f"🕛 Next summary in {round(sleep_seconds/3600, 2)} hours...")
         time.sleep(sleep_seconds)
 
         closed_trades = [t for t in trades.values() if t["closed"]]
