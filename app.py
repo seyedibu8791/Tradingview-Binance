@@ -226,22 +226,24 @@ def webhook():
         symbol = ticker.replace("USDT", "") + "USDT"
         close_price = float(close_price)
 
-# ENTRY signals
-if comment == "BUY_ENTRY":
-    async_exit_and_open(symbol, "BUY", close_price)
-elif comment == "SELL_ENTRY":
-    async_exit_and_open(symbol, "SELL", close_price)
+        # ===== ENTRY signals =====
+        if comment == "BUY_ENTRY":
+            async_exit_and_open(symbol, "BUY", close_price)
+        elif comment == "SELL_ENTRY":
+            async_exit_and_open(symbol, "SELL", close_price)
 
-# CROSS_EXIT signals — close only, no reopen
-elif comment == "CROSS_EXIT_SHORT":
-    execute_market_exit(symbol, "BUY")   # closes LONG positions
-elif comment == "CROSS_EXIT_LONG":
-    execute_market_exit(symbol, "SELL")  # closes SHORT positions
-    
+        # ===== CROSS_EXIT signals — close only, no reopen =====
+        elif comment == "CROSS_EXIT_SHORT":
+            execute_market_exit(symbol, "BUY")   # closes LONG positions
+        elif comment == "CROSS_EXIT_LONG":
+            execute_market_exit(symbol, "SELL")  # closes SHORT positions
+
+        # ===== Normal EXIT signals =====
         elif comment == "EXIT_LONG":
             execute_market_exit(symbol, "BUY")
         elif comment == "EXIT_SHORT":
             execute_market_exit(symbol, "SELL")
+
         else:
             return jsonify({"error": f"Unknown comment: {comment}"})
 
@@ -250,7 +252,6 @@ elif comment == "CROSS_EXIT_LONG":
     except Exception as e:
         print("❌ Webhook Error:", e)
         return jsonify({"error": str(e)})
-
 
 # ===== Ping =====
 @app.route("/ping", methods=["GET"])
