@@ -1,13 +1,13 @@
 from flask import Flask, request, jsonify
 import requests, hmac, hashlib, time, threading, os
 from config import *
-from trade_notifier import log_trade_entry, log_trade_exit, trades, send_telegram_message  # ✅ include telegram
+from trade_notifier import log_trade_entry, log_trade_exit, trades, send_telegram_message
 from datetime import datetime
 
 app = Flask(__name__)
 
-# ====== Global dictionary for higher timeframe trends ======
-pair_trends = {}  # e.g. {'BTCUSDT': {'interval': '4H', 'direction': 'LONG'}}
+# ====== Store active pair trends ======
+pair_trends = {}  # e.g. {'BTCUSDT': {'interval': '4H', 'direction': 'LONG', 'tf_value': 240}}
 
 # ===== Binance Helpers =====
 def binance_signed_request(http_method, path, params=None):
@@ -181,7 +181,7 @@ def clean_residual_positions(symbol):
         print("⚠️ Residual cleanup failed:", e)
 
 
-# ===== Async Close & Open Logic =====
+# ===== Async Exit & Open =====
 def async_exit_and_open(symbol, new_side, limit_price):
     def worker():
         pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
@@ -200,6 +200,7 @@ def async_exit_and_open(symbol, new_side, limit_price):
         open_position(symbol, new_side, limit_price)
 
     threading.Thread(target=worker, daemon=True).start()
+
 
 # ===== Utility: Convert timeframe (e.g. 15m → 15, 4H → 240) =====
 def tf_to_minutes(tf):
@@ -233,13 +234,11 @@ def webhook():
         interval = interval.upper().strip()
         tf_value = tf_to_minutes(interval)
 
-        # === Determine if this is higher or lower timeframe ===
         trend_info = pair_trends.get(symbol)
         higher_tf_value = trend_info["tf_value"] if trend_info else 0
 
-        # ===== 1️⃣ Higher timeframe signal handler =====
+        # 1️⃣ Higher TF signal: only BUY_ENTRY / SELL_ENTRY define trend
         if not trend_info or tf_value > higher_tf_value:
-            # Only BUY_ENTRY / SELL_ENTRY define trend
             if comment in ["BUY_ENTRY", "SELL_ENTRY"]:
                 new_trend = "LONG" if comment == "BUY_ENTRY" else "SHORT"
                 prev_trend = trend_info["direction"] if trend_info else None
@@ -250,10 +249,10 @@ def webhook():
                     print(msg)
                     send_telegram_message(msg)
 
-            # Ignore non-entry higher timeframe alerts
+            # Ignore exit/non-entry on higher TF
             return jsonify({"status": "trend_updated"})
 
-        # ===== 2️⃣ Lower timeframe signal handler =====
+        # 2️⃣ Lower TF signals follow higher TF trend
         if trend_info and tf_value < higher_tf_value:
             allowed_direction = trend_info["direction"]
 
@@ -262,7 +261,7 @@ def webhook():
                    (allowed_direction == "SHORT" and comment == "SELL_ENTRY"):
                     async_exit_and_open(symbol, "BUY" if comment == "BUY_ENTRY" else "SELL", close_price)
                 else:
-                    msg = f"🚫 {symbol} {interval} {comment} blocked — higher TF trend: {allowed_direction}"
+                    msg = f"🚫 {symbol} {interval} {comment} blocked — higher TF: {allowed_direction}"
                     print(msg)
                     send_telegram_message(msg)
                     return jsonify({"status": "blocked_by_trend"})
@@ -270,19 +269,15 @@ def webhook():
             elif comment in ["EXIT_LONG", "EXIT_SHORT", "CROSS_EXIT_LONG", "CROSS_EXIT_SHORT"]:
                 execute_market_exit(symbol, "BUY" if "LONG" in comment else "SELL")
 
-            else:
-                print(f"⚠️ Unknown comment {comment} for {symbol}")
-                return jsonify({"status": "unknown_comment"})
-
             return jsonify({"status": "processed_lower_tf"})
 
-        # ===== 3️⃣ If both TF equal or no trend stored yet =====
+        # 3️⃣ Equal TF or no trend case
         if not trend_info:
             print(f"⚠️ No higher timeframe trend for {symbol}, skipping trade.")
             return jsonify({"status": "no_trend"})
 
         if tf_value == higher_tf_value:
-            print(f"ℹ️ {symbol} {interval} same as trend TF, treating as higher TF update.")
+            print(f"ℹ️ {symbol} {interval} same as higher TF; ignored.")
             return jsonify({"status": "same_tf_ignored"})
 
         return jsonify({"status": "ok"})
@@ -292,8 +287,7 @@ def webhook():
         return jsonify({"error": str(e)})
 
 
-
-# ===== Ping =====
+# ===== Health Check =====
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
