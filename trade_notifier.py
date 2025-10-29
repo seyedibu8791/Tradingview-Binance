@@ -49,45 +49,53 @@ def send_telegram_message(message: str):
 # =======================
 # 🟩 TRADE ENTRY LOGGING
 # =======================
-def log_trade_entry(symbol: str, side: str, order_id: str, status: str, filled_price: float = None):
+def log_trade_entry(symbol: str, side: str, order_id: str, status: str, pos_data=None, filled_price: float = None):
     """Send both NEW (created) and FILLED (confirmed) messages safely."""
 
     symbol = symbol.upper()
     side = side.upper()
 
-    # Avoid duplicates
+    # Avoid duplicate or repeated updates
     prev_status = notified_orders.get(order_id)
     if prev_status == status:
         print(f"⚠️ Skipping duplicate {status} message for {symbol}")
         return
 
+    # Ensure filled_price from pos_data if missing
+    if filled_price is None and pos_data:
+        try:
+            if isinstance(pos_data, list) and len(pos_data) > 0:
+                filled_price = float(pos_data[0].get("entryPrice", 0))
+            elif isinstance(pos_data, dict):
+                filled_price = float(pos_data.get("entryPrice", 0))
+        except Exception as e:
+            print(f"⚠️ Could not parse filled_price from pos_data for {symbol}: {e}")
+
     # --- 1️⃣ NEW Order Created ---
     if status == "NEW":
-        arrow = "⬆️" if side == "BUY" else "⬇️"
-        label = "Long Trade" if side == "BUY" else "Short Trade"
-
-        message = f"""
-{arrow} <b>{label}</b>
+        message = f"""📈 <b>Trade Entry</b>
 Symbol: <b>#{symbol}</b>
 Side: <b>{side}</b>
 Leverage: {LEVERAGE}x
-Trade Amount: ${TRADE_AMOUNT}
 --- ⌁ ---
 Entry Price: <b>{filled_price or 'Pending Fill'}</b>
 --- ⌁ ---
-🕐 Order Created — Waiting for Fill Confirmation...
-"""
+🕐 Waiting for Exit Signal..."""
         send_telegram_message(message)
         notified_orders[order_id] = "NEW"
 
     # --- 2️⃣ FILLED Order Confirmed ---
     elif status == "FILLED":
+        # Skip if trade already closed (race condition)
+        if symbol in trades and trades[symbol].get("closed"):
+            print(f"⚠️ Skipping FILLED notification — trade already closed for {symbol}")
+            return
+
         message = f"""#<b>{symbol}</b> All entry targets achieved ✅
 Average Entry Price: <b>{filled_price}</b> 💵"""
         send_telegram_message(message)
         notified_orders[order_id] = "FILLED"
 
-        # Track trade
         trades[symbol] = {
             "side": side,
             "entry_price": filled_price,
