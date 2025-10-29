@@ -1,5 +1,5 @@
 # trade_notifier.py
-#
+
 import requests
 import threading
 import time
@@ -17,7 +17,7 @@ LEVERAGE = 20
 # =======================
 # 🧾 STORAGE
 # =======================
-trades = {}
+trades = {}           # {symbol: {...}}
 notified_orders = {}  # {order_id: "NEW"/"FILLED"}
 
 
@@ -44,9 +44,14 @@ def send_telegram_message(message: str):
 # 🟩 TRADE ENTRY LOGGING
 # =======================
 def log_trade_entry(symbol: str, side: str, order_id: str, status: str, filled_price: float = None):
-    """Send entry updates in two stages — on creation & on fill"""
+    """Send entry updates in two stages — creation & fill"""
 
-    # 1️⃣ Order created (first time)
+    # If this symbol trade already exists and is closed → skip any fill notification
+    if symbol in trades and trades[symbol].get("closed", False):
+        print(f"⚠️ Skipping fill for {symbol} — trade already closed.")
+        return
+
+    # 1️⃣ Order created
     if status == "NEW" and notified_orders.get(order_id) != "NEW":
         message = f"""📈 <b>Trade Entry</b>
 Symbol: <b>#{symbol}</b>
@@ -59,14 +64,19 @@ Entry Price: <b>{filled_price or 'Pending Fill'}</b>
         send_telegram_message(message)
         notified_orders[order_id] = "NEW"
 
-    # 2️⃣ When order gets filled
+    # 2️⃣ Order fully filled
     elif status == "FILLED" and notified_orders.get(order_id) != "FILLED":
+        # If somehow this trade was already marked closed, skip
+        if symbol in trades and trades[symbol].get("closed", False):
+            print(f"⚠️ Skipping duplicate FILLED message for closed trade {symbol}")
+            return
+
         message = f"""#<b>{symbol}</b> All entry targets achieved ✅
 Average Entry Price: <b>{filled_price}</b> 💵"""
         send_telegram_message(message)
         notified_orders[order_id] = "FILLED"
 
-        # Save trade info
+        # Save trade record
         trades[symbol] = {
             "side": side,
             "entry_price": filled_price,
@@ -83,6 +93,7 @@ Average Entry Price: <b>{filled_price}</b> 💵"""
 # =======================
 def log_trade_exit(symbol: str, order_id: str, filled_price: float):
     """Record and notify a trade exit"""
+
     if symbol not in trades:
         trades[symbol] = {
             "side": "UNKNOWN",
@@ -99,7 +110,7 @@ def log_trade_exit(symbol: str, order_id: str, filled_price: float):
 
     # Calculate PnL
     qty = TRADE_AMOUNT
-    entry_price = trade["entry_price"]
+    entry_price = trade.get("entry_price", filled_price)
 
     if trade["side"] == "BUY":
         pnl = (filled_price - entry_price) * qty * LEVERAGE / entry_price
