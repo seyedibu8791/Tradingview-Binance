@@ -9,6 +9,12 @@ app = Flask(__name__)
 # ====== Store active pair trends ======
 pair_trends = {}  # e.g. {'BTCUSDT': {'interval': '4H', 'direction': 'LONG', 'tf_value': 240}}
 
+# Minimum TF (in minutes) required to initialize trend after first deploy.
+# Set via env var MIN_INIT_TF_MINUTES, default 60 (1 hour). Adjust if you want
+# the trend to be initialized by smaller timeframes.
+MIN_INIT_TF_MINUTES = int(os.getenv("MIN_INIT_TF_MINUTES", "60"))
+
+
 # ===== Binance Helpers =====
 def binance_signed_request(http_method, path, params=None):
     if params is None:
@@ -85,7 +91,11 @@ def calculate_quantity(symbol):
 
 
 # ===== Open Position =====
-def open_position(symbol, side, limit_price):
+def open_position(symbol, side, limit_price, notify=True):
+    """
+    notify=True: will call log_trade_entry as before (sends Telegram via trade_notifier).
+    notify=False: suppress entry notification (used for lower-TF silent entries).
+    """
     active_count = count_active_trades()
     if active_count >= MAX_ACTIVE_TRADES:
         print(f"🚫 Max active trades reached ({active_count}/{MAX_ACTIVE_TRADES})")
@@ -94,8 +104,21 @@ def open_position(symbol, side, limit_price):
     set_leverage_and_margin(symbol)
     qty = calculate_quantity(symbol)
 
-    if symbol not in trades or trades[symbol].get("closed", True):
-        log_trade_entry(symbol, side, "PENDING", limit_price)
+    if notify:
+        if symbol not in trades or trades[symbol].get("closed", True):
+            log_trade_entry(symbol, side, "PENDING", limit_price)
+    else:
+        # still ensure trade record exists, but don't notify
+        if symbol not in trades or trades[symbol].get("closed", True):
+            trades[symbol] = {
+                "side": side,
+                "entry_price": limit_price,
+                "order_id": "PENDING",
+                "closed": False,
+                "exit_price": None,
+                "pnl": 0,
+                "pnl_percent": 0,
+            }
 
     response = binance_signed_request("POST", "/fapi/v1/order", {
         "symbol": symbol,
@@ -108,21 +131,40 @@ def open_position(symbol, side, limit_price):
 
     if "orderId" in response:
         order_id = response["orderId"]
-        threading.Thread(target=wait_and_notify_filled_entry, args=(symbol, side, order_id), daemon=True).start()
+        # pass notify through to the waiter so it only notifies if desired
+        threading.Thread(target=wait_and_notify_filled_entry, args=(symbol, side, order_id, notify), daemon=True).start()
 
     return response
 
 
-def wait_and_notify_filled_entry(symbol, side, order_id):
+def wait_and_notify_filled_entry(symbol, side, order_id, notify=True):
+    """
+    Waits for entry order fill. If notify==True, calls log_trade_entry() to send Telegram.
+    If notify==False, updates trades[] silently.
+    """
     notified = False
     while True:
         order_status = binance_signed_request("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
         status = order_status.get("status")
         executed_qty = float(order_status.get("executedQty", 0))
         avg_price = float(order_status.get("avgPrice") or order_status.get("price") or 0)
+
         if not notified and status in ("PARTIALLY_FILLED", "FILLED") and executed_qty > 0:
-            log_trade_entry(symbol, side, order_id, avg_price)
+            if notify:
+                log_trade_entry(symbol, side, order_id, avg_price)
+            else:
+                # update trades dict silently
+                trades[symbol] = {
+                    "side": side,
+                    "entry_price": avg_price,
+                    "order_id": order_id,
+                    "closed": False,
+                    "exit_price": None,
+                    "pnl": 0,
+                    "pnl_percent": 0,
+                }
             notified = True
+
         if status in ("FILLED", "CANCELED", "REJECTED", "EXPIRED"):
             break
         time.sleep(1)
@@ -182,7 +224,7 @@ def clean_residual_positions(symbol):
 
 
 # ===== Async Exit & Open =====
-def async_exit_and_open(symbol, new_side, limit_price):
+def async_exit_and_open(symbol, new_side, limit_price, notify=True):
     def worker():
         pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
         amt = float(pos_data[0]["positionAmt"]) if pos_data else 0
@@ -197,7 +239,7 @@ def async_exit_and_open(symbol, new_side, limit_price):
             execute_market_exit(symbol, opposite_side)
             time.sleep(OPPOSITE_CLOSE_DELAY)
 
-        open_position(symbol, new_side, limit_price)
+        open_position(symbol, new_side, limit_price, notify=notify)
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -214,7 +256,8 @@ def tf_to_minutes(tf):
     elif tf.endswith("M"):
         return int(tf[:-1]) * 43200
     else:
-        return int(tf.replace("M", "").replace("MIN", ""))
+        # handle '1', '3', '5', '15', etc. or '1min' forms
+        return int(tf.replace("MIN", "").replace("M", ""))
 
 
 # ===== Webhook =====
@@ -237,49 +280,86 @@ def webhook():
         trend_info = pair_trends.get(symbol)
         higher_tf_value = trend_info["tf_value"] if trend_info else 0
 
-        # 1️⃣ Higher TF signal: only BUY_ENTRY / SELL_ENTRY define trend
-        if not trend_info or tf_value > higher_tf_value:
+        # 1️⃣ If trend not initialized yet -> only initialize from sufficiently high TF
+        if not trend_info:
+            # require the incoming TF to be >= MIN_INIT_TF_MINUTES to initialize trend
+            if tf_value >= MIN_INIT_TF_MINUTES and comment in ["BUY_ENTRY", "SELL_ENTRY"]:
+                pair_trends[symbol] = {
+                    "interval": interval,
+                    "direction": "LONG" if comment == "BUY_ENTRY" else "SHORT",
+                    "tf_value": tf_value
+                }
+                msg = f"🆕 #{symbol} trend initialized to {pair_trends[symbol]['direction']} in {interval}"
+                print(msg)
+                send_telegram_message(msg)
+                return jsonify({"status": "trend_initialized"})
+            else:
+                # waiting for a higher timeframe signal to initialize trend
+                print(f"⏸ {symbol} {interval} {comment} ignored — waiting for higher TF >= {MIN_INIT_TF_MINUTES}m")
+                return jsonify({"status": "waiting_for_trend"})
+
+        # 2️⃣ Higher timeframe updates the trend (when incoming TF is larger)
+        if tf_value > higher_tf_value:
             if comment in ["BUY_ENTRY", "SELL_ENTRY"]:
                 new_trend = "LONG" if comment == "BUY_ENTRY" else "SHORT"
-                prev_trend = trend_info["direction"] if trend_info else None
+                prev_trend = trend_info["direction"]
 
-                if prev_trend != new_trend or tf_value != higher_tf_value:
+                if new_trend != prev_trend or tf_value != higher_tf_value:
                     pair_trends[symbol] = {"interval": interval, "direction": new_trend, "tf_value": tf_value}
                     msg = f"📊 #{symbol} trend changed to {new_trend} in {interval}"
                     print(msg)
                     send_telegram_message(msg)
-
-            # Ignore exit/non-entry on higher TF
+                else:
+                    print(f"ℹ️ {symbol} {interval} same trend ({new_trend}), no change.")
+            else:
+                print(f"↩️ Ignored non-entry alert {comment} from higher timeframe {interval}")
             return jsonify({"status": "trend_updated"})
 
-        # 2️⃣ Lower TF signals follow higher TF trend
-        if trend_info and tf_value < higher_tf_value:
+        # 3️⃣ Lower timeframe signals follow higher TF trend
+        if tf_value < higher_tf_value:
             allowed_direction = trend_info["direction"]
 
+            # Entry signals
             if comment in ["BUY_ENTRY", "SELL_ENTRY"]:
                 if (allowed_direction == "LONG" and comment == "BUY_ENTRY") or \
                    (allowed_direction == "SHORT" and comment == "SELL_ENTRY"):
-                    async_exit_and_open(symbol, "BUY" if comment == "BUY_ENTRY" else "SELL", close_price)
+                    # execute silently (no entry telegram) -> notify=False
+                    async_exit_and_open(symbol, "BUY" if comment == "BUY_ENTRY" else "SELL", close_price, notify=False)
+                    print(f"✅ {symbol} {interval} {comment} executed following {allowed_direction} trend.")
+                    return jsonify({"status": "executed_lower_tf"})
                 else:
                     msg = f"🚫 {symbol} {interval} {comment} blocked — higher TF: {allowed_direction}"
                     print(msg)
                     send_telegram_message(msg)
                     return jsonify({"status": "blocked_by_trend"})
 
+            # Exit signals: only execute if the pair currently has an open trade
             elif comment in ["EXIT_LONG", "EXIT_SHORT", "CROSS_EXIT_LONG", "CROSS_EXIT_SHORT"]:
-                execute_market_exit(symbol, "BUY" if "LONG" in comment else "SELL")
+                trade = trades.get(symbol)
+                # check for open trade in local trades dict (trade_notifier)
+                if trade and not trade.get("closed", True):
+                    # send exit notification immediately and execute market exit
+                    msg = f"⚡ {symbol} {interval} {comment} executed"
+                    print(msg)
+                    send_telegram_message(msg)
+                    # determine close side: if EXIT_LONG -> close BUY position (close side param set accordingly inside execute_market_exit)
+                    execute_market_exit(symbol, "BUY" if "LONG" in comment else "SELL")
+                    return jsonify({"status": "exit_executed"})
+                else:
+                    print(f"ℹ️ {symbol} {interval} {comment} ignored — no open trade to exit.")
+                    return jsonify({"status": "no_open_trade"})
 
-            return jsonify({"status": "processed_lower_tf"})
+            else:
+                print(f"⚠️ Unknown comment {comment} for {symbol}")
+                return jsonify({"status": "unknown_comment"})
 
-        # 3️⃣ Equal TF or no trend case
-        if not trend_info:
-            print(f"⚠️ No higher timeframe trend for {symbol}, skipping trade.")
-            return jsonify({"status": "no_trend"})
-
+        # 4️⃣ Equal TF or unknown condition
         if tf_value == higher_tf_value:
-            print(f"ℹ️ {symbol} {interval} same as higher TF; ignored.")
+            # treat as no-op / ignored (owner TF)
+            print(f"ℹ️ {symbol} {interval} same as owner TF; ignored.")
             return jsonify({"status": "same_tf_ignored"})
 
+        # fallback
         return jsonify({"status": "ok"})
 
     except Exception as e:
