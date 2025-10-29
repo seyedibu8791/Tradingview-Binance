@@ -46,37 +46,40 @@ def send_telegram_message(message: str):
 def log_trade_entry(symbol: str, side: str, order_id: str, status: str, filled_price: float = None):
     """Send entry updates in two stages — creation & fill"""
 
-    # If this symbol trade already exists and is closed → skip any fill notification
     if symbol in trades and trades[symbol].get("closed", False):
         print(f"⚠️ Skipping fill for {symbol} — trade already closed.")
         return
 
     # 1️⃣ Order created
     if status == "NEW" and notified_orders.get(order_id) != "NEW":
-        message = f"""📈 <b>Trade Entry</b>
+        direction_icon = "⬆️" if side.upper() == "BUY" else "⬇️"
+        trade_type = "Long Trade" if side.upper() == "BUY" else "Short Trade"
+
+        message = f"""{direction_icon} <b>{trade_type}</b>
 Symbol: <b>#{symbol}</b>
-Side: <b>{side}</b>
-Leverage: {LEVERAGE}x
+Side: <b>{side.upper()}</b>
+--- ⌁ ---
+Leverage: <b>{LEVERAGE}x</b>
+Trade Amount: <b>{TRADE_AMOUNT}$</b>
 --- ⌁ ---
 Entry Price: <b>{filled_price or 'Pending Fill'}</b>
 --- ⌁ ---
-🕐 Waiting for Exit Signal..."""
+🕐 Wait for Exit Signal.."""
         send_telegram_message(message)
         notified_orders[order_id] = "NEW"
 
     # 2️⃣ Order fully filled
     elif status == "FILLED" and notified_orders.get(order_id) != "FILLED":
-        # If somehow this trade was already marked closed, skip
         if symbol in trades and trades[symbol].get("closed", False):
             print(f"⚠️ Skipping duplicate FILLED message for closed trade {symbol}")
             return
 
-        message = f"""#<b>{symbol}</b> All entry targets achieved ✅
+        direction_icon = "⬆️" if side.upper() == "BUY" else "⬇️"
+        message = f"""{direction_icon} <b>#{symbol}</b> All entry targets achieved ✅
 Average Entry Price: <b>{filled_price}</b> 💵"""
         send_telegram_message(message)
         notified_orders[order_id] = "FILLED"
 
-        # Save trade record
         trades[symbol] = {
             "side": side,
             "entry_price": filled_price,
@@ -112,10 +115,10 @@ def log_trade_exit(symbol: str, order_id: str, filled_price: float):
     qty = TRADE_AMOUNT
     entry_price = trade.get("entry_price", filled_price)
 
-    if trade["side"] == "BUY":
+    if trade["side"].upper() == "BUY":
         pnl = (filled_price - entry_price) * qty * LEVERAGE / entry_price
         pnl_percent = ((filled_price - entry_price) / entry_price) * 100 * LEVERAGE
-    elif trade["side"] == "SELL":
+    elif trade["side"].upper() == "SELL":
         pnl = (entry_price - filled_price) * qty * LEVERAGE / entry_price
         pnl_percent = ((entry_price - filled_price) / entry_price) * 100 * LEVERAGE
     else:
@@ -124,17 +127,24 @@ def log_trade_exit(symbol: str, order_id: str, filled_price: float):
     trade["pnl"] = round(pnl, 2)
     trade["pnl_percent"] = round(pnl_percent, 2)
 
-    status_icon = "🤑" if pnl > 0 else "⛔️"
-
-    message = f"""📉 <b>Trade Closed</b> {status_icon}
+    # Exit message style
+    if pnl > 0:
+        message = f"""Profit Achieved! ✅
+PnL: <b>{trade['pnl']}$</b> | <b>{trade['pnl_percent']}%</b>
+--- ⌁ ---
 Symbol: <b>#{symbol}</b>
-Side: <b>{trade['side']}</b>
 --- ⌁ ---
-Entry: {trade['entry_price']}
-Exit: {trade['exit_price']}
+Entry: <b>{trade['entry_price']}</b>
+Exit: <b>{trade['exit_price']}</b>"""
+    else:
+        message = f"""Ended in Loss! ⛔️
+PnL: <b>{trade['pnl']}$</b> | <b>{trade['pnl_percent']}%</b>
 --- ⌁ ---
-PnL $: {trade['pnl']}
-PnL %: {trade['pnl_percent']}%"""
+Symbol: <b>#{symbol}</b>
+--- ⌁ ---
+Entry: <b>{trade['entry_price']}</b>
+Exit: <b>{trade['exit_price']}</b>"""
+
     send_telegram_message(message)
 
 
