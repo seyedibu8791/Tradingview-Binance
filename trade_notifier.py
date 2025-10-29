@@ -1,12 +1,11 @@
 # trade_notifier.py
-
 import requests
 import threading
 import time
 import datetime
 
 # =======================
-# 🔧 CONFIG
+# 🔧 CONFIG (HARD-CODED)
 # =======================
 TELEGRAM_BOT_TOKEN = "8282710007:AAFbcLUwHRrMrBJ5VacJQQFM27qxdCplwO4"
 TELEGRAM_CHAT_ID = "-1003281678423"
@@ -20,9 +19,8 @@ LEVERAGE = 20
 trades = {}           # {symbol: {...}}
 notified_orders = {}  # {order_id: "NEW"/"FILLED"}
 
-
 # =======================
-# 📢 TELEGRAM
+# 📢 TELEGRAM HELPER
 # =======================
 def send_telegram_message(message: str):
     try:
@@ -36,6 +34,8 @@ def send_telegram_message(message: str):
 
         if response.status_code != 200:
             print("❌ Telegram Error:", response.status_code, response.text)
+        else:
+            print(f"✅ Sent Telegram message: {message[:60]}...")
     except Exception as e:
         print("❌ Telegram Exception:", e)
 
@@ -44,23 +44,26 @@ def send_telegram_message(message: str):
 # 🟩 TRADE ENTRY LOGGING
 # =======================
 def log_trade_entry(symbol: str, side: str, order_id: str, status: str, filled_price: float = None):
-    """Send entry updates in two stages — creation & fill"""
+    """Send both NEW (created) and FILLED (confirmed) messages"""
 
-    if symbol in trades and trades[symbol].get("closed", False):
-        print(f"⚠️ Skipping fill for {symbol} — trade already closed.")
+    symbol = symbol.upper()
+    side = side.upper()
+
+    # Avoid duplicate sending for same order_id/status
+    if notified_orders.get(order_id) == status:
         return
 
-    # 1️⃣ Order created
-    if status == "NEW" and notified_orders.get(order_id) != "NEW":
-        direction_icon = "⬆️" if side.upper() == "BUY" else "⬇️"
-        trade_type = "Long Trade" if side.upper() == "BUY" else "Short Trade"
+    # --- 1️⃣ NEW Order Created ---
+    if status == "NEW":
+        arrow = "⬆️" if side == "BUY" else "⬇️"
+        label = "Long Trade" if side == "BUY" else "Short Trade"
 
-        message = f"""{direction_icon} <b>{trade_type}</b>
+        message = f"""{arrow} <b>{label}</b>
 Symbol: <b>#{symbol}</b>
-Side: <b>{side.upper()}</b>
+Side: <b>{side}</b>
 --- ⌁ ---
-Leverage: <b>{LEVERAGE}x</b>
-Trade Amount: <b>{TRADE_AMOUNT}$</b>
+Leverage: {LEVERAGE}x
+Trade Amount: ${TRADE_AMOUNT}
 --- ⌁ ---
 Entry Price: <b>{filled_price or 'Pending Fill'}</b>
 --- ⌁ ---
@@ -68,18 +71,14 @@ Entry Price: <b>{filled_price or 'Pending Fill'}</b>
         send_telegram_message(message)
         notified_orders[order_id] = "NEW"
 
-    # 2️⃣ Order fully filled
-    elif status == "FILLED" and notified_orders.get(order_id) != "FILLED":
-        if symbol in trades and trades[symbol].get("closed", False):
-            print(f"⚠️ Skipping duplicate FILLED message for closed trade {symbol}")
-            return
-
-        direction_icon = "⬆️" if side.upper() == "BUY" else "⬇️"
-        message = f"""{direction_icon} <b>#{symbol}</b> All entry targets achieved ✅
+    # --- 2️⃣ FILLED Order Confirmed ---
+    elif status == "FILLED":
+        message = f"""#<b>{symbol}</b> All entry targets achieved ✅
 Average Entry Price: <b>{filled_price}</b> 💵"""
         send_telegram_message(message)
         notified_orders[order_id] = "FILLED"
 
+        # Store trade details
         trades[symbol] = {
             "side": side,
             "entry_price": filled_price,
@@ -95,7 +94,8 @@ Average Entry Price: <b>{filled_price}</b> 💵"""
 # 🟥 TRADE EXIT LOGGING
 # =======================
 def log_trade_exit(symbol: str, order_id: str, filled_price: float):
-    """Record and notify a trade exit"""
+    """Record and notify trade exit"""
+    symbol = symbol.upper()
 
     if symbol not in trades:
         trades[symbol] = {
@@ -111,14 +111,14 @@ def log_trade_exit(symbol: str, order_id: str, filled_price: float):
     trade["exit_price"] = filled_price
     trade["closed"] = True
 
-    # Calculate PnL
     qty = TRADE_AMOUNT
-    entry_price = trade.get("entry_price", filled_price)
+    entry_price = trade["entry_price"]
 
-    if trade["side"].upper() == "BUY":
+    # PnL Calculation
+    if trade["side"] == "BUY":
         pnl = (filled_price - entry_price) * qty * LEVERAGE / entry_price
         pnl_percent = ((filled_price - entry_price) / entry_price) * 100 * LEVERAGE
-    elif trade["side"].upper() == "SELL":
+    elif trade["side"] == "SELL":
         pnl = (entry_price - filled_price) * qty * LEVERAGE / entry_price
         pnl_percent = ((entry_price - filled_price) / entry_price) * 100 * LEVERAGE
     else:
@@ -127,33 +127,33 @@ def log_trade_exit(symbol: str, order_id: str, filled_price: float):
     trade["pnl"] = round(pnl, 2)
     trade["pnl_percent"] = round(pnl_percent, 2)
 
-    # Exit message style
     if pnl > 0:
         message = f"""Profit Achieved! ✅
-PnL: <b>{trade['pnl']}$</b> | <b>{trade['pnl_percent']}%</b>
+PnL: <b>{trade['pnl']}$</b> | {trade['pnl_percent']}%
 --- ⌁ ---
 Symbol: <b>#{symbol}</b>
 --- ⌁ ---
-Entry: <b>{trade['entry_price']}</b>
-Exit: <b>{trade['exit_price']}</b>"""
+Entry: {trade['entry_price']}
+Exit: {trade['exit_price']}"""
     else:
         message = f"""Ended in Loss! ⛔️
-PnL: <b>{trade['pnl']}$</b> | <b>{trade['pnl_percent']}%</b>
+PnL: <b>{trade['pnl']}$</b> | {trade['pnl_percent']}%
 --- ⌁ ---
 Symbol: <b>#{symbol}</b>
 --- ⌁ ---
-Entry: <b>{trade['entry_price']}</b>
-Exit: <b>{trade['exit_price']}</b>"""
+Entry: {trade['entry_price']}
+Exit: {trade['exit_price']}"""
 
     send_telegram_message(message)
 
 
 # =======================
-# 📅 DAILY SUMMARY
+# 📅 DAILY SUMMARY THREAD
 # =======================
 def send_daily_summary():
+    """Send daily performance summary automatically (midnight IST)"""
     while True:
-        now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5.5)))  # IST
+        now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5.5)))
         next_run = now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
         sleep_seconds = (next_run - now).total_seconds()
         time.sleep(sleep_seconds)
@@ -183,5 +183,5 @@ def send_daily_summary():
         trades.clear()
 
 
-# Start daily summary thread
+# Start background summary thread
 threading.Thread(target=send_daily_summary, daemon=True).start()
