@@ -388,30 +388,37 @@ def webhook():
                     send_telegram_message(f"⛔ LT entry ignored for #{symbol} at {interval} — HT direction unknown. LT signal: {comment_u}")
                     return jsonify({"status": "ignored", "reason": "ht_unknown"}), 200
 
+                # Map entry comment to direction
                 entry_dir = "BUY" if comment_u == "BUY_ENTRY" else "SELL"
 
-                # --- Case 1: matches HT direction → normal open
+                # Check if any open position exists
+                pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
+                pos_amt = 0
+                if pos_data and isinstance(pos_data, list) and len(pos_data) > 0:
+                    pos_amt = float(pos_data[0].get("positionAmt", 0))
+
+                has_open_position = abs(pos_amt) > 0
+
+                # Determine direction of open position (if any)
+                pos_side = "BUY" if pos_amt > 0 else ("SELL" if pos_amt < 0 else None)
+
                 if entry_dir == ht_direction:
+                    # ✅ Matches higher timeframe trend — allow new entry or re-entry
                     async_exit_and_open(symbol, entry_dir, close_price)
                     return jsonify({"status": "ok", "message": "LT entry processed (matches HT)"}), 200
 
-                # --- Case 2: opposite to HT → check if existing position needs to be closed
-                pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
-                if pos_data and abs(float(pos_data[0]["positionAmt"])) > 0:
-                    amt = float(pos_data[0]["positionAmt"])
-                    side_open = "BUY" if amt > 0 else "SELL"
+                elif has_open_position and pos_side != entry_dir:
+                    # ⚙️ Opposite signal — use it to close open position only
+                    send_telegram_message(f"⚠️ Opposite LT signal detected for #{symbol} ({entry_dir}). Used to close open {pos_side} position.")
+                    execute_market_exit(symbol, pos_side)
+                    return jsonify({"status": "ok", "message": "Opposite LT signal used for exit"}), 200
 
-                    # If open position is opposite of LT signal, close it
-                    if side_open != entry_dir:
-                        execute_market_exit(symbol, side_open)
-                        send_telegram_message(f"✅ LT opposite signal used to close existing #{symbol} {side_open} position at {close_price} (HT={ht_direction})")
-                        return jsonify({"status": "ok", "message": "LT opposite signal closed existing position"}), 200
+                else:
+                    # 🚫 No open position and LT signal is against HT trend — block it
+                    send_telegram_message(f"⛔ LT entry blocked for #{symbol} at {interval} — HT is {ht_direction}, LT signalled {entry_dir}.")
+                    return jsonify({"status": "blocked_by_ht", "ht_direction": ht_direction}), 200
 
-                # --- Case 3: no open position → block counter-trend entry
-                send_telegram_message(f"⛔ LT entry blocked for #{symbol} at {interval} — HT is {ht_direction}, LT signalled {entry_dir}, and no open position.")
-                return jsonify({"status": "blocked_by_ht", "ht_direction": ht_direction}), 200
-
-            # If it's an exit (any exit), always allow — close existing positions
+            # ✅ Always allow exit (regardless of HT direction)
             if is_exit:
                 # Map exit comments to sides for execute_market_exit
                 if is_cross_exit_short or is_exit_long:
@@ -419,6 +426,16 @@ def webhook():
                 elif is_cross_exit_long or is_exit_short:
                     execute_market_exit(symbol, "SELL")
                 return jsonify({"status": "ok", "message": "LT exit processed"}), 200
+
+            # Unknown LT comment
+            return jsonify({"status": "ignored", "message": "Unknown LT comment"}), 200
+
+        # Default fallback
+        return jsonify({"status": "ignored", "message": "Unhandled case"}), 200
+
+    except Exception as e:
+        print("❌ Webhook Error:", e)
+        return jsonify({"error": str(e)}), 500
 
 
 # ===== Ping =====
