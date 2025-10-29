@@ -113,15 +113,24 @@ def open_position(symbol, side, limit_price):
 
 
 def wait_and_notify_filled_entry(symbol, side, order_id):
-    """Wait until Binance fills the entry order, then update Telegram once."""
+    """Notify as soon as the order is partially or fully filled, only once."""
+    notified = False
+
     while True:
         order_status = binance_signed_request("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
-        if order_status.get("status") == "FILLED":
-            filled_price = float(order_status.get("avgPrice") or order_status.get("price") or 0)
-            # ✅ Only update if not already filled
-            if trades.get(symbol, {}).get("order_id") != order_id:
-                log_trade_entry(symbol, side, order_id, filled_price)
+        status = order_status.get("status")
+        executed_qty = float(order_status.get("executedQty", 0))
+        avg_price = float(order_status.get("avgPrice") or order_status.get("price") or 0)
+
+        # ✅ Send Telegram entry message as soon as partially filled
+        if not notified and status in ("PARTIALLY_FILLED", "FILLED") and executed_qty > 0:
+            log_trade_entry(symbol, side, order_id, avg_price)
+            notified = True
+
+        # ✅ Stop checking once the order is completely filled or canceled
+        if status in ("FILLED", "CANCELED", "REJECTED", "EXPIRED"):
             break
+
         time.sleep(1)
 
 
